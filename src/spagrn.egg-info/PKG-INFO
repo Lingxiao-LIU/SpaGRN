@@ -1,0 +1,28 @@
+Metadata-Version: 2.1
+Name: spagrn
+Version: 1.1.4
+Summary: A comprehensive tool to infer TF-centred, spatial gene regulatory networks for the spatially resolved transcriptomic data.
+Home-page: https://github.com/BGI-Qingdao/SpaGRN
+Author: Yao LI
+Author-email: Yao LI <liyao1@genomics.cn>
+Platform: any
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.8,<3.9
+License-File: LICENSE
+Requires-Dist: anndata<0.9,>=0.8.0
+Requires-Dist: pandas<2.0.0,>=1.3.4
+Requires-Dist: scanpy<1.9.4,>=1.9.1
+Requires-Dist: seaborn<0.13
+Requires-Dist: matplotlib<=3.5.3
+Requires-Dist: pyscenic==0.12.1
+Requires-Dist: hotspotsc==1.1.1
+Requires-Dist: scipy
+Requires-Dist: numpy<1.24,>=1.16.6
+Requires-Dist: dask
+Requires-Dist: arboreto
+Requires-Dist: ctxcore>=0.2.0
+Requires-Dist: scikit-learn
+Requires-Dist: esda
+Requires-Dist: pysal

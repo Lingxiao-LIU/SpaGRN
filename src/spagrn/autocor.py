@@ -73,30 +73,92 @@ def compute_weights(distances, neighborhood_factor=3):
     return weights
 
 
+# /Users/linliu/NewSpaGRN/src/spagrn/autocor.py
 def neighbors_and_weights(data,
-                          latent_obsm_key="spatial",
-                          n_neighbors=30,
-                          neighborhood_factor=3):
+                         latent_obsm_key="spatial",
+                         n_neighbors=30,
+                         neighborhood_factor=3,
+                         batch_key=None):
     """
-    :param data:
-    :param latent_obsm_key:
-    :param n_neighbors:
-    :param neighborhood_factor:
-    :param approx_neighbors:
-    :return:
+    Compute k-NN graph and weights, optionally batch-aware, using sklearn.neighbors.NearestNeighbors.
+
+    Parameters
+    ----------
+    data : anndata.AnnData
+        AnnData object containing spatial coordinates and gene expression.
+    latent_obsm_key : str, optional
+        Key in data.obsm for spatial coordinates (default: 'spatial').
+    n_neighbors : int, optional
+        Number of neighbors for k-NN graph (default: 30).
+    neighborhood_factor : float, optional
+        Factor for weight decay in weighted graph (default: 3).
+    batch_key : str, optional
+        Key in data.obs for batch labels to enable batch-aware k-NN computation.
+
+    Returns
+    -------
+    ind : pd.DataFrame
+        Neighbor indices.
+    neighbors : pd.DataFrame
+        Neighbor indices (same as ind).
+    weights : pd.DataFrame
+        Neighbor weights.
     """
     from sklearn.neighbors import NearestNeighbors
+    import pandas as pd
+    import numpy as np
+
     coords = data.obsm[latent_obsm_key]
-    # get Nearest n Neighbors
-    nbrs = NearestNeighbors(n_neighbors=n_neighbors, algorithm="ball_tree").fit(coords)
-    dist, ind = nbrs.kneighbors()  # neighbor name and index
-    # get spatial weights between two points
-    weights = compute_weights(
-        dist, neighborhood_factor=neighborhood_factor)
-    ind_df = pd.DataFrame(ind, index=data.obs_names)
-    neighbors = ind_df
-    weights = pd.DataFrame(weights, index=neighbors.index,
-                           columns=neighbors.columns)
+    if batch_key and batch_key not in data.obs:
+        raise ValueError(f"Batch key '{batch_key}' not found in data.obs")
+
+    if batch_key:
+        # Initialize empty DataFrames for neighbors and weights
+        ind = pd.DataFrame(index=data.obs_names, columns=range(n_neighbors), dtype=np.int64)
+        weights = pd.DataFrame(index=data.obs_names, columns=range(n_neighbors), dtype=np.float64)
+        
+        # Map cell names to indices
+        index_map = {name: idx for idx, name in enumerate(data.obs_names)}
+        
+        # Compute k-NN for each batch
+        for batch in data.obs[batch_key].unique():
+            batch_mask = data.obs[batch_key] == batch
+            batch_indices = data.obs_names[batch_mask]
+            batch_coords = coords[batch_mask]
+            
+            # Adjust n_neighbors if batch has fewer cells
+            n_neighbors_batch = min(n_neighbors, len(batch_indices))
+            if n_neighbors_batch <= 1:
+                print(f"Warning: Batch {batch} has too few cells ({len(batch_indices)}) for meaningful neighbors.")
+                continue
+                
+            # Compute k-NN for this batch
+            nbrs = NearestNeighbors(n_neighbors=n_neighbors_batch, algorithm="ball_tree").fit(batch_coords)
+            distances, indices = nbrs.kneighbors(batch_coords)
+            
+            # Map batch-local indices to global indices
+            global_indices = np.array([index_map[batch_indices[i]] for i in indices.flatten()]).reshape(indices.shape)
+            
+            # Compute weights
+            batch_weights = compute_weights(distances, neighborhood_factor=neighborhood_factor)
+            
+            # Store results
+            for i, cell_idx in enumerate(batch_indices):
+                ind.loc[cell_idx, :n_neighbors_batch-1] = global_indices[i, :n_neighbors_batch-1]
+                weights.loc[cell_idx, :n_neighbors_batch-1] = batch_weights[i, :n_neighbors_batch-1]
+        
+        # Fill NaN values for cells in small batches
+        ind = ind.fillna(-1).astype(np.int64)
+        weights = weights.fillna(0.0).astype(np.float64)
+    else:
+        # Non-batch-aware computation
+        nbrs = NearestNeighbors(n_neighbors=n_neighbors, algorithm="ball_tree").fit(coords)
+        distances, indices = nbrs.kneighbors()
+        weights = compute_weights(distances, neighborhood_factor=neighborhood_factor)
+        ind = pd.DataFrame(indices, index=data.obs_names)
+        weights = pd.DataFrame(weights, index=data.obs_names, columns=ind.columns)
+    
+    neighbors = ind
     return ind, neighbors, weights
 
 
@@ -300,65 +362,45 @@ def view(som, raw=True, c=False, line=False):
 # -----------------------------------------------------#
 # Main
 # -----------------------------------------------------#
-# def spatial_autocorrelation(adata,
-#                             layer_key="raw_counts",
-#                             latent_obsm_key="spatial",
-#                             n_neighbors=10,
-#                             somde_k=20,
-#                             n_processes=None,
-#                             prefix='',
-#                             output_dir='.'):
-#     """
-#     Calculate spatial autocorrelation values using Moran's I, Geary'C, Getis's G and SOMDE algorithms
-#     :param adata:
-#     :param layer_key:
-#     :param latent_obsm_key:
-#     :param n_neighbors:
-#     :param somde_k:
-#     :param n_processes:
-#     :param prefix:
-#     :param output_dir:
-#     :return:
-#     """
-#     print('Computing spatial weights matrix...')
-#     sc.pp.filter_cells(adata, min_genes=100)
-#     ind, neighbors, weights_n = neighbors_and_weights(adata, latent_obsm_key=latent_obsm_key, n_neighbors=n_neighbors)
-#     Weights = get_w(ind, weights_n)
-#     print("Computing Moran's I...")
-#     # morans_ps = morans_i_p_values(adata, ind, weights_n, layer_key=layer_key, n_process=n_processes)
-#     # # np.savetxt(f'{output_dir}/{prefix}_morans_ps.txt', morans_ps)
-#     # fdr_morans_ps = fdr(morans_ps)
-#     # # np.savetxt(f'{output_dir}/{prefix}_fdr_morans_ps.txt', fdr_morans_ps)
-#     # print("Computing Geary's C...")
-#     # gearys_cs = gearys_c_p_values(adata, ind, weights_n, layer_key=layer_key, n_process=n_processes)
-#     # # np.savetxt(f'{output_dir}/{prefix}_gearys_cs.txt', gearys_cs)
-#     # fdr_gearys_cs = fdr(gearys_cs)
-#     # # np.savetxt(f'{output_dir}/{prefix}_fdr_gearys_cs.txt', fdr_gearys_cs)
-#     # print("Computing Getis G...")
-#     getis_gs = getis_g_p_values(adata, Weights, n_processes=n_processes, layer_key=layer_key)
-#     np.savetxt(f'{output_dir}/{prefix}_getis_gs.txt', getis_gs)
-#     # fdr_getis_gs = fdr(getis_gs)
-#     # np.savetxt(f'{output_dir}/{prefix}_fdr_getis_gs.txt', fdr_getis_gs)
-#     morans_ps = np.loadtxt(f'{output_dir}/{prefix}_morans_ps.txt')
-#     fdr_morans_ps = np.loadtxt(f'{output_dir}/{prefix}_fdr_morans_ps.txt')
-#     gearys_cs = np.loadtxt(f'{output_dir}/{prefix}_gearys_cs.txt')
-#     fdr_gearys_cs = np.loadtxt(f'{output_dir}/{prefix}_fdr_gearys_cs.txt')
-#     # getis_gs = np.loadtxt(f'{output_dir}/{prefix}_getis_gs.txt')
-#     # fdr_getis_gs = np.loadtxt(f'{output_dir}/{prefix}_fdr_getis_gs.txt')
-#     print('Computing SOMDE...')
-#     adjusted_p_values = somde_p_values(adata, k=somde_k, layer_key=layer_key, latent_obsm_key=latent_obsm_key)
-#     # np.savetxt(f'{output_dir}/{prefix}_fdr_SOMDE.txt', adjusted_p_values)
-#     more_stats = pd.DataFrame({
-#         'C': gearys_cs,
-#         'FDR_C': fdr_gearys_cs,
-#         'I': morans_ps,
-#         'FDR_I': fdr_morans_ps,
-#         'G': getis_gs,
-#         'FDR_G': fdr_getis_gs,
-#         'FDR_SOMDE': adjusted_p_values
-#     }, index=adata.var_names)
-#     more_stats.to_csv(f'{output_dir}/{prefix}_more_stats.csv', sep='\t')
-#     return more_stats
+# /Users/linliu/NewSpaGRN/src/spagrn/autocor.py
+#def spatial_autocorrelation(adata,
+#                            layer_key="raw_counts",
+#                            latent_obsm_key="spatial",
+#                            n_neighbors=10,
+#                            somde_k=20,
+#                            n_processes=None,
+#                            prefix='',
+#                            output_dir='.',
+#                            batch_key=None):
+#    print('Computing spatial weights matrix...')
+#    sc.pp.filter_cells(adata, min_genes=100)
+#    ind, neighbors, weights_n = neighbors_and_weights(adata,
+#                                                     latent_obsm_key=latent_obsm_key,
+#                                                     n_neighbors=n_neighbors,
+#                                                     batch_key=batch_key)
+#    Weights = get_w(ind, weights_n)
+#    print("Computing Moran's I...")
+#    morans_ps = morans_i_p_values(adata, Weights, layer_key=layer_key, n_process=n_processes)
+#    fdr_morans_ps = fdr(morans_ps)
+#    print("Computing Geary's C...")
+#    gearys_cs = gearys_c(adata, Weights, layer_key=layer_key, n_process=n_processes, mode='pvalue')
+#    fdr_gearys_cs = fdr(gearys_cs)
+#    print("Computing Getis G...")
+#    getis_gs = getis_g_p_values(adata, Weights, n_processes=n_processes, layer_key=layer_key)
+#    fdr_getis_gs = fdr(getis_gs)
+#    print('Computing SOMDE...')
+#    adjusted_p_values = somde_p_values(adata, k=somde_k, layer_key=layer_key, latent_obsm_key=latent_obsm_key)
+#    more_stats = pd.DataFrame({
+#        'C': gearys_cs,
+#        'FDR_C': fdr_gearys_cs,
+#        'I': morans_ps,
+#        'FDR_I': fdr_morans_ps,
+#        'G': getis_gs,
+#        'FDR_G': fdr_getis_gs,
+#       'FDR_SOMDE': adjusted_p_values
+#    }, index=adata.var_names)
+#    more_stats.to_csv(f'{output_dir}/{prefix}_more_stats.csv', sep='\t')
+#    return more_stats
 #
 #
 # def combind_fdrs(pvalue_df, method='fisher') -> np.array:
@@ -382,15 +424,16 @@ def view(som, raw=True, c=False, line=False):
 #     return adata
 #
 #
-# def hot(data, layer_key="raw_counts", latent_obsm_key="spatial"):
-#     import hotspot
-#     hs = hotspot.Hotspot(data,
-#                          layer_key=layer_key,
-#                          model='bernoulli',
-#                          latent_obsm_key=latent_obsm_key)
-#     hs.create_knn_graph(weighted_graph=False, n_neighbors=10)
-#     hs_results = hs.compute_autocorrelations()
-#     return hs, hs_results
+#def hot(data, layer_key="raw_counts", latent_obsm_key="spatial", batch_key=None):
+#    from spagrn import hotspot
+#    hs = hotspot.Hotspot(data,
+#                         layer_key=layer_key,
+#                         model='bernoulli',
+#                         latent_obsm_key=latent_obsm_key,
+#                         batch_key=batch_key)
+#    hs.create_knn_graph(weighted_graph=False, n_neighbors=10, batch_aware=batch_key is not None)
+#    hs_results = hs.compute_autocorrelations()
+#    return hs, hs_results
 #
 #
 # def select_genes(more_stats, hs_results, fdr_threshold=0.05, combine=True):
@@ -432,66 +475,45 @@ def view(som, raw=True, c=False, line=False):
 #     return genes
 #
 #
-# def main(prefix,
-#          fn,
-#          output_dir,
-#          n_process=4,
-#          min_genes=0,
-#          min_cells=3,
-#          min_counts=1,
-#          layer_key=None,
-#          latent_obsm_key="spatial",
-#          n_neighbors=10,
-#          somde_k=20):
-#     """
-#     Main function to calculate spatial autocorrelation values for genes
-#     :param prefix: project name
-#     :param fn: h5ad file name
-#     :param output_dir: output directory
-#     :param n_process: number of processes when computing in parallel
-#     :param min_genes: filter cells
-#     :param min_cells: filter genes
-#     :param min_counts: filter genes
-#     :param layer_key: layers containing gene expression matrix
-#     :param latent_obsm_key: key stored cell/spot spatial coordinates
-#     :param n_neighbors: number of neighbors when building KNN
-#     :param somde_k: number of neighbors when using SOMDE model
-#     :return:
-#     """
-#     adata = sc.read_h5ad(fn)
-#     adata = preprocess(adata, min_genes=min_genes, min_cells=min_cells, min_counts=min_counts)
-#     # ---- HOTSPOT autocorrelation
-#     hs, hs_results = hot(adata, layer_key=layer_key, latent_obsm_key=latent_obsm_key)
-#     # Select genes
-#     more_stats = spatial_autocorrelation(adata,
-#                                          layer_key=layer_key,
-#                                          latent_obsm_key=latent_obsm_key,
-#                                          n_neighbors=n_neighbors,
-#                                          somde_k=somde_k,
-#                                          n_processes=n_process,
-#                                          prefix=prefix,
-#                                          output_dir=output_dir)
-#     select_genes(more_stats, hs_results, fdr_threshold=0.05, combine=False)
+# /Users/linliu/NewSpaGRN/src/spagrn/autocor.py
+#def main(prefix,
+#         fn,
+#         output_dir,
+#         n_process=4,
+#         min_genes=0,
+#         min_cells=3,
+#         min_counts=1,
+#         layer_key=None,
+#         latent_obsm_key="spatial",
+#         n_neighbors=10,
+#         somde_k=20,
+#         batch_key=None):
+#    adata = sc.read_h5ad(fn)
+#    adata = preprocess(adata, min_genes=min_genes, min_cells=min_cells, min_counts=min_counts)
+#    hs, hs_results = hot(adata, layer_key=layer_key, latent_obsm_key=latent_obsm_key, batch_key=batch_key)
+#    more_stats = spatial_autocorrelation(adata,
+#                                        layer_key=layer_key,
+#                                        latent_obsm_key=latent_obsm_key,
+#                                        n_neighbors=n_neighbors,
+#                                        somde_k=somde_k,
+#                                        n_processes=n_process,
+#                                        prefix=prefix,
+#                                        output_dir=output_dir,
+#                                        batch_key=batch_key)
+#    select_genes(more_stats, hs_results, fdr_threshold=0.05, combine=False)
 #
 #
-# if __name__ == '__main__':
-#     project_id = sys.argv[1]
-#     # 1. E14-16h
-#     # more_stats = spatial_autocorrelation(sub_adata,
-#     #                                      layer_key="raw_counts",
-#     #                                      latent_obsm_key="spatial",
-#     #                                      n_neighbors=10,
-#     #                                      somde_k=20,
-#     #                                      n_processes=None,
-#     #                                      prefix='',
-#     #                                      output_dir='.')
-#     # select_genes(more_stats, hs_results, fdr_threshold=0.05, combine=False)
-#     if project_id == 'E14':
-#         fn = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/DATA/fly_pca/E14-16h_pca.h5ad'
-#         output_dir = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/exp/13.revision/E14-16h'
-#         prefix = 'E14-16h'
-#         print(f'Running for {prefix} project...')
-#         main(prefix, fn, output_dir, n_process=3, layer_key="raw_counts",latent_obsm_key="spatial",n_neighbors=10,somde_k=20)
+# /Users/linliu/NewSpaGRN/src/spagrn/autocor.py
+#if __name__ == '__main__':
+#    project_id = sys.argv[1]
+#    batch_key = sys.argv[2] if len(sys.argv) > 2 else None
+#    if project_id == 'E14':
+#        fn = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/DATA/fly_pca/E14-16h_pca.h5ad'
+#        output_dir = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/exp/13.revision/E14-16h'
+#        prefix = 'E14-16h'
+#        print(f'Running for {prefix} project...')
+#        main(prefix, fn, output_dir, n_process=3, layer_key="raw_counts",
+#             latent_obsm_key="spatial", n_neighbors=10, somde_k=20, batch_key=batch_key)
 #     elif project_id == 'E16':
 #         fn = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/DATA/fly_pca/E16-18h_pca.h5ad'
 #         output_dir = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/exp/13.revision/E16-18h'

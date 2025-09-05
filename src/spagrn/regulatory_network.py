@@ -126,45 +126,42 @@ class InferNetwork(Network):
         }
         self.tmp_dir = None
 
-    # GRN pipeline infer logic
-    def infer(self,
-              databases: str,
-              motif_anno_fn: str,
-              tfs_fn,
-              gene_list: Optional[List] = None,
-              cluster_label='annotation',
-              niche_df=None,
-              receptor_key='to',
-              num_workers=None,
-              save_tmp=False,
-              cache=False,
-              output_dir=None,
 
-              layers='raw_counts',
-              model='bernoulli',
-              latent_obsm_key='spatial',
-              umi_counts_obs_key=None,
-              n_neighbors=30,
-              weighted_graph=False,
-              rho_mask_dropouts=False,
-              local=False,
-              methods=None,
-              operation='intersection',
-              combine=False,
-              mode='moran',
-              somde_k=20,
-              noweights=None,
-              normalize: bool = False):
+    def infer(self,
+            databases: str,
+            motif_anno_fn: str,
+            tfs_fn,
+            gene_list: Optional[List] = None,
+            cluster_label='annotation',
+            niche_df=None,
+            receptor_key='to',
+            num_workers=None,
+            save_tmp=False,
+            cache=False,
+            output_dir=None,
+            layers='raw_counts',
+            model='bernoulli',
+            latent_obsm_key='spatial',
+            umi_counts_obs_key=None,
+            n_neighbors=30,
+            weighted_graph=False,
+            rho_mask_dropouts=False,
+            local=False,
+            methods=None,
+            operation='intersection',
+            combine=False,
+            mode='moran',
+            somde_k=20,
+            noweights=None,
+            normalize: bool = False,
+            batch_key=None):
         print('----------------------------------------')
-        # Set project name
         print(f'Project name is {self.project_name}')
-        # Set general output directory
-        if output_dir is None:  # when output dir is not set
-            output_dir = os.path.dirname(os.path.abspath(__file__))  # set output dir to current working dir
+        if output_dir is None:
+            output_dir = os.path.dirname(os.path.abspath(__file__))
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
         print(f'Saving output files into {output_dir}')
-        # Set project tmp directory to save temporary files
         if save_tmp:
             self.tmp_dir = os.path.join(output_dir, 'tmp_files')
             if not os.path.exists(self.tmp_dir):
@@ -181,35 +178,33 @@ class InferNetwork(Network):
         if noweights is None:
             noweights = self.params["noweights"]
 
-        # 1. load TF list
         if tfs_fn is None:
             tfs = 'all'
         else:
             tfs = self.load_tfs(tfs_fn)
 
-        # 2. load the ranking databases
         dbs = self.load_database(databases)
 
-        # 3. GRN Inference
         adjacencies = self.spg(self.data,
-                               gene_list=gene_list,
-                               tf_list=tfs,
-                               jobs=num_workers,
-                               layer_key=layers,
-                               model=model,
-                               latent_obsm_key=latent_obsm_key,
-                               umi_counts_obs_key=umi_counts_obs_key,
-                               n_neighbors=n_neighbors,
-                               weighted_graph=weighted_graph,
-                               cache=cache,
-                               save_tmp=save_tmp,
-                               fn=os.path.join(self.tmp_dir, f'{mode}_adj.csv'),
-                               local=local,
-                               methods=methods,
-                               operation=operation,
-                               combine=combine,
-                               mode=mode,
-                               somde_k=somde_k)
+                            gene_list=gene_list,
+                            tf_list=tfs,
+                            jobs=num_workers,
+                            layer_key=layers,
+                            model=model,
+                            latent_obsm_key=latent_obsm_key,
+                            umi_counts_obs_key=umi_counts_obs_key,
+                            n_neighbors=n_neighbors,
+                            weighted_graph=weighted_graph,
+                            cache=cache,
+                            save_tmp=save_tmp,
+                            fn=os.path.join(self.tmp_dir, f'{mode}_adj.csv'),
+                            local=local,
+                            methods=methods,
+                            operation=operation,
+                            combine=combine,
+                            mode=mode,
+                            somde_k=somde_k,
+                            batch_key=batch_key)
 
         # 4. Compute Modules
         # ctxcore.genesig.Regulon
@@ -379,7 +374,8 @@ class InferNetwork(Network):
                                 somde_k=20,
                                 n_processes=None,
                                 local=False,
-                                cache=False):
+                                cache=False,
+                                batch_key=None):
         """
         Calculate spatial autocorrelation values using Moran's I, Geary'C, Getis's G and SOMDE algorithms
         :param adata:
@@ -393,8 +389,10 @@ class InferNetwork(Network):
         :return:
         """
         print('Computing spatial weights matrix...')
-        self.ind, neighbors, self.weights_n = neighbors_and_weights(adata, latent_obsm_key=latent_obsm_key,
-                                                                    n_neighbors=n_neighbors)
+        self.ind, neighbors, self.weights_n = neighbors_and_weights(adata,
+                                                                latent_obsm_key=latent_obsm_key,
+                                                                n_neighbors=n_neighbors,
+                                                                batch_key=batch_key)
         Weights = get_w(self.ind, self.weights_n)
         self.weights = Weights
 
@@ -544,7 +542,7 @@ class InferNetwork(Network):
             somde_k=20,
             fn: str = 'adj.csv',
             mode='moran',
-            **kwargs) -> pd.DataFrame:
+            batch_key=None):
         """
         Inference of co-expression modules by spatial-proximity-graph (SPG) model.
         :param data: Count matrix (shape is cells by genes)
@@ -577,8 +575,10 @@ class InferNetwork(Network):
         :param operation:
         :param methods:
         :param fn: output file name
+        :param batch_key: batch label
         :return: A dataframe, local correlation Z-scores between genes (shape is genes x genes)
-        """
+        """        
+        from spagrn import hotspot
         global local_correlations
         if cache and os.path.isfile(fn):
             print(f'Found cached file {fn}')
@@ -586,42 +586,46 @@ class InferNetwork(Network):
             self.data.uns['adj'] = local_correlations
             return local_correlations
         else:
-            # 2024-12-20: select genes or provide a list of genes
+            if batch_key and batch_key not in data.obs:
+                raise ValueError(f"Batch key '{batch_key}' not found in data.obs")
             if gene_list:
                 hs_genes = gene_list
                 print('Computing spatial weights matrix...')
-                self.ind, neighbors, self.weights_n = neighbors_and_weights(data, latent_obsm_key=latent_obsm_key,
-                                                                            n_neighbors=n_neighbors)
+                self.ind, neighbors, self.weights_n = neighbors_and_weights(data,
+                                                                        latent_obsm_key=latent_obsm_key,
+                                                                        n_neighbors=n_neighbors,
+                                                                        batch_key=batch_key)
                 Weights = get_w(self.ind, self.weights_n)
                 self.weights = Weights
             else:
                 hs = hotspot.Hotspot(data,
-                                     layer_key=layer_key,
-                                     model=model,
-                                     latent_obsm_key=latent_obsm_key,
-                                     umi_counts_obs_key=umi_counts_obs_key,
-                                     **kwargs)
-                hs.create_knn_graph(weighted_graph=weighted_graph, n_neighbors=n_neighbors)
-                hs_results = hs.compute_autocorrelations()
-
-                # 1: Select genes
+                                    layer_key=layer_key,
+                                    model=model,
+                                    latent_obsm_key=latent_obsm_key,
+                                    umi_counts_obs_key=umi_counts_obs_key,
+                                    batch_key=batch_key)
+                hs.create_knn_graph(weighted_graph=weighted_graph,
+                                    n_neighbors=n_neighbors,
+                                    batch_aware=batch_key is not None)
+                hs_results = hs.compute_autocorrelations(jobs=jobs)
+                hs_genes = hs_results.loc[hs_results.FDR < 0.05].index
                 self.spatial_autocorrelation(data,
-                                             layer_key=layer_key,
-                                             latent_obsm_key=latent_obsm_key,
-                                             n_neighbors=n_neighbors,
-                                             somde_k=somde_k,
-                                             n_processes=jobs,
-                                             local=local,
-                                             cache=cache)
+                                            layer_key=layer_key,
+                                            latent_obsm_key=latent_obsm_key,
+                                            n_neighbors=n_neighbors,
+                                            somde_k=somde_k,
+                                            n_processes=jobs,
+                                            local=local,
+                                            cache=cache,
+                                            batch_key=batch_key)
                 self.more_stats['FDR'] = hs_results.FDR
                 if save_tmp:
                     self.more_stats.to_csv(f'{self.tmp_dir}/more_stats.csv', sep='\t')
-
                 hs_genes = self.select_genes(methods=methods,
-                                             fdr_threshold=fdr_threshold,
-                                             local=local,
-                                             combine=combine,
-                                             operation=operation)
+                                            fdr_threshold=fdr_threshold,
+                                            local=local,
+                                            combine=combine,
+                                            operation=operation)
                 hs_genes = list(hs_genes)
                 assert len(hs_genes) > 0
                 if save_tmp:
@@ -809,29 +813,29 @@ class InferNetwork(Network):
         :param fn:
         :return: A dataframe with the AUCs (n_cells x n_modules).
         """
-        if cache and os.path.isfile(fn):
-            print(f'Find cached file {fn}')
-            auc_mtx = pd.read_csv(fn, index_col=0)  # important! cell must be index, not one of the column
-            self.auc_mtx = auc_mtx
-            self.data.obsm['auc_mtx'] = self.auc_mtx
-            return auc_mtx
-
-        if num_workers is None:
-            num_workers = cpu_count()
-
-        auc_mtx = aucell(matrix,
-                         regulons,
-                         auc_threshold=auc_threshold,
-                         num_workers=num_workers,
-                         noweights=noweights,
-                         normalize=normalize,
-                         seed=seed)
-
+        if not isinstance(matrix, pd.DataFrame):
+            matrix = pd.DataFrame(matrix.toarray() if hasattr(matrix, 'toarray') else matrix, 
+                                index=self.data.obs_names, columns=self.data.var_names)
+        
+        print("Input matrix index:", matrix.index[:5])  # Show first 5 for brevity
+        print("Input df index:", self._data.to_df().index[:5])
+        print("adata obs_names:", self.data.obs_names[:5])
+        
+        auc_mtx = aucell(matrix, regulons, auc_threshold=auc_threshold, 
+                        num_workers=num_workers, normalize=normalize, seed=seed)
+        print("auc_mtx index:", auc_mtx.index[:5])
+        
+        # Ensure indices match
+        auc_mtx = auc_mtx.reindex(self.data.obs_names)
+        if auc_mtx.isna().any().any():
+            print("Warning: NaN values in auc_mtx after reindexing. Filling with 0.")
+            auc_mtx = auc_mtx.fillna(0)
+        
         self.auc_mtx = auc_mtx
         self.data.obsm['auc_mtx'] = self.auc_mtx
         if save_tmp:
-            auc_mtx.to_csv(os.path.join(self.tmp_dir, 'auc_mtx.csv'))
-        return auc_mtx
+            auc_mtx.to_csv(fn)  
+  
 
     def receptor_auc(self, auc_threshold=None, p_range=0.01, num_workers=20) -> Optional[pd.DataFrame]:
         """

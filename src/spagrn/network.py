@@ -6,6 +6,7 @@
 # (e.g. TFs), target genes. and cell types, regulons score between cell types and activity level among cells. and
 # regulator-target regulatory effect.
 
+__all__ = ['Network', 'regulon_specificity_scores']
 import os
 
 import json
@@ -17,7 +18,6 @@ import anndata as an
 from typing import Sequence
 
 from ctxcore.genesig import Regulon
-from pyscenic.rss import regulon_specificity_scores
 
 
 def remove_all_zero(auc_mtx):
@@ -316,6 +316,24 @@ class Network:
             self.data.uns['regulon_dict'] = self.regulon_dict
         with open(fn, 'w') as f:
             json.dump(self.regulon_dict, f, sort_keys=True, indent=4)
+
+    def regulon_specificity_scores(auc_mtx, cell_type_series):
+        def rss(aucs, labels):
+            return 1.0 - jensenshannon(aucs / aucs.sum(), labels / labels.sum())
+        
+        cats = cell_type_series.dropna().unique()
+        n_types = len(cats)
+        regulons = list(auc_mtx.columns)
+        n_regulons = len(regulons)
+        rss_values = np.empty(shape=(n_types, n_regulons), dtype=np.float64)  # Fixed: use np.float64 instead of np.float
+        
+        for i, cat in enumerate(cats):
+            aucs = auc_mtx.loc[cell_type_series == cat, regulons].mean()
+            labels = np.zeros(n_types)
+            labels[i] = 1
+            rss_values[i, :] = [rss(aucs[regulon], labels) for regulon in regulons]
+        
+        return pd.DataFrame(data=rss_values, index=cats, columns=regulons)
 
     # Regulons and Cell Types
     def cal_regulon_score(self, cluster_label='annotation', save_tmp=False, fn='regulon_specificity_scores.txt'):
