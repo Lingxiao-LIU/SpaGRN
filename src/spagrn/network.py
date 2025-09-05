@@ -6,7 +6,6 @@
 # (e.g. TFs), target genes. and cell types, regulons score between cell types and activity level among cells. and
 # regulator-target regulatory effect.
 
-__all__ = ['Network', 'regulon_specificity_scores']
 import os
 
 import json
