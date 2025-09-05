@@ -5,7 +5,7 @@
 # @File: spagrn/hotspot.py
 import sys
 
-import hotspot
+from spagrn import hotspot
 import scanpy as sc
 import pandas as pd
 import seaborn as sns
@@ -128,10 +128,11 @@ def main():
     hs = hotspot.Hotspot(
         adata,
         layer_key=None,
-        model='danb',
+        model='danb', #suitable for Higher throughput data
         latent_obsm_key="spatial",
+        batch_key=batch_key,
     )
-    hs.create_knn_graph(weighted_graph=False, n_neighbors=30)
+    hs.create_knn_graph(weighted_graph=False, n_neighbors=30, batch_aware=True,)
     hs_results = hs.compute_autocorrelations(jobs=20)
     hs_genes = hs_results.loc[hs_results.FDR < 0.05].index  # Select genes
 

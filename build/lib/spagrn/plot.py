@@ -20,6 +20,7 @@ import scanpy as sc
 import seaborn as sns
 import matplotlib.pyplot as plt
 from typing import Optional
+from pyscenic.rss import regulon_specificity_scores
 import matplotlib as mpl
 mpl.rcParams['pdf.fonttype'] = 42
 mpl.rcParams['ps.fonttype'] = 42
@@ -309,23 +310,6 @@ def plot_3d_web(data, auc_mtx, reg_name, prefix='', zscale=1, xscale=1, yscale=1
                       scene_aspectratio=dict(x=xscale, y=yscale, z=zscale))
     fig.write_html(f'{prefix}_regulon.html')
 
-def regulon_specificity_scores(auc_mtx, cell_type_series):
-    def rss(aucs, labels):
-        return 1.0 - jensenshannon(aucs / aucs.sum(), labels / labels.sum())
-    
-    cats = cell_type_series.dropna().unique()
-    n_types = len(cats)
-    regulons = list(auc_mtx.columns)
-    n_regulons = len(regulons)
-    rss_values = np.empty(shape=(n_types, n_regulons), dtype=np.float64)  # Fixed: use np.float64 instead of np.float
-    
-    for i, cat in enumerate(cats):
-        aucs = auc_mtx.loc[cell_type_series == cat, regulons].mean()
-        labels = np.zeros(n_types)
-        labels[i] = 1
-        rss_values[i, :] = [rss(aucs[regulon], labels) for regulon in regulons]
-    
-    return pd.DataFrame(data=rss_values, index=cats, columns=regulons)
 
 def auc_heatmap(data: anndata.AnnData,
                 auc_mtx: pd.DataFrame,
