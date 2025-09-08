@@ -281,30 +281,24 @@ class Hotspot:
 
 
     def compute_autocorrelations(self, jobs=1):
-        """Compute spatial autocorrelation (Moran's I) for each gene using the k-NN graph.
-
+        """Compute spatial autocorrelation for each gene using the k-NN graph.
+    
         Parameters
         ----------
         jobs : int, optional
             Number of parallel jobs to run (default: 1).
-
+    
         Returns
         -------
         pandas.DataFrame
-            DataFrame with Moran's I and p-value for each gene.
+            DataFrame with columns matching the expected format.
         """
         if self.neighbors is None or self.weights is None:
             raise ValueError("Must call create_knn_graph before computing autocorrelations.")
         
-        # Normalize counts (for Bernoulli model, use detection probability)
-        counts = self.counts
-        if issparse(counts):
-            counts = counts.toarray()
-        detection_prob = counts / self.umi_counts.values[:, None]  # Shape: (cells, genes)
-        
-        # Initialize results
-        n_genes = counts.shape[1]
-        autocorrelations = pd.DataFrame(index=self.adata.var_names, columns=['moran_I', 'pval'])
+        # Delegate to the proper _compute_hotspot method which handles all calculations correctly
+        print("Computing spatial autocorrelations using Hotspot method...")
+        return self._compute_hotspot(jobs=jobs)
         
         def compute_moran_I(gene_idx):
             gene_expr = detection_prob[:, gene_idx]
