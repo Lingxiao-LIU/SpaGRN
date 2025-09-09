@@ -6,36 +6,28 @@
 import os
 import sys
 import time
-
+import warnings  # Added missing import
 import scipy
 import scanpy as sc
 import numpy as np
 import pandas as pd
 import anndata as ad
-
 from pynndescent import NNDescent
 from scipy.stats import chi2, norm
 from scipy import stats
 from scipy.spatial.distance import pdist, squareform
 from scipy.sparse import csr_matrix, issparse
-
 from esda.getisord import G
 from esda.moran import Moran
 from esda.geary import Geary
-
 import multiprocessing
 from tqdm import tqdm
+from libpysal import weights
 
 
-# -----------------------------------------------------#
-# spatial weights
-# -----------------------------------------------------#
 def save_array(array, fn='array.json'):
     import json
-    from json import JSONEncoder
     class NumpyEncoder(json.JSONEncoder):
-        """ Special json encoder for numpy types """
-
         def default(self, obj):
             if isinstance(obj, np.integer):
                 return int(obj)
@@ -44,8 +36,7 @@ def save_array(array, fn='array.json'):
             elif isinstance(obj, np.ndarray):
                 return obj.tolist()
             return json.JSONEncoder.default(self, obj)
-
-    encodedNumpyData = json.dumps(array, cls=NumpyEncoder)  # use dump() to write array into file
+    encodedNumpyData = json.dumps(array, cls=NumpyEncoder)
     with open(fn, 'w', encoding='utf-8') as f:
         json.dump(encodedNumpyData, f)
 
@@ -73,141 +64,70 @@ def compute_weights(distances, neighborhood_factor=3):
     return weights
 
 
-# /Users/linliu/NewSpaGRN/src/spagrn/autocor.py
-def neighbors_and_weights(data,
-                         latent_obsm_key="spatial",
-                         n_neighbors=30,
-                         neighborhood_factor=3,
-                         batch_key=None):
+def get_w(neighbors_indices, weights_n):
     """
-    Compute k-NN graph and weights, optionally batch-aware, using sklearn.neighbors.NearestNeighbors.
-
-    Parameters
-    ----------
-    data : anndata.AnnData
-        AnnData object containing spatial coordinates and gene expression.
-    latent_obsm_key : str, optional
-        Key in data.obsm for spatial coordinates (default: 'spatial').
-    n_neighbors : int, optional
-        Number of neighbors for k-NN graph (default: 30).
-    neighborhood_factor : float, optional
-        Factor for weight decay in weighted graph (default: 3).
-    batch_key : str, optional
-        Key in data.obs for batch labels to enable batch-aware k-NN computation.
-
-    Returns
-    -------
-    ind : pd.DataFrame
-        Neighbor indices.
-    neighbors : pd.DataFrame
-        Neighbor indices (same as ind).
-    weights : pd.DataFrame
-        Neighbor weights.
+    Create spatial weights matrix from neighbor indices and weights
+    neighbors_indices can be DataFrame or numpy array
     """
-    from sklearn.neighbors import NearestNeighbors
-    import pandas as pd
     import numpy as np
-
-    coords = data.obsm[latent_obsm_key]
-    if batch_key and batch_key not in data.obs:
-        raise ValueError(f"Batch key '{batch_key}' not found in data.obs")
-
-    if batch_key:
-        # Initialize empty DataFrames for neighbors and weights
-        ind = pd.DataFrame(index=data.obs_names, columns=range(n_neighbors), dtype=np.int64)
-        weights = pd.DataFrame(index=data.obs_names, columns=range(n_neighbors), dtype=np.float64)
-        
-        # Map cell names to indices
-        index_map = {name: idx for idx, name in enumerate(data.obs_names)}
-        
-        # Compute k-NN for each batch
-        for batch in data.obs[batch_key].unique():
-            batch_mask = data.obs[batch_key] == batch
-            batch_indices = data.obs_names[batch_mask]
-            batch_coords = coords[batch_mask]
-            
-            # Adjust n_neighbors if batch has fewer cells
-            n_neighbors_batch = min(n_neighbors, len(batch_indices))
-            if n_neighbors_batch <= 1:
-                print(f"Warning: Batch {batch} has too few cells ({len(batch_indices)}) for meaningful neighbors.")
-                continue
-                
-            # Compute k-NN for this batch
-            nbrs = NearestNeighbors(n_neighbors=n_neighbors_batch, algorithm="ball_tree").fit(batch_coords)
-            distances, indices = nbrs.kneighbors(batch_coords)
-            
-            # Map batch-local indices to global indices
-            global_indices = np.array([index_map[batch_indices[i]] for i in indices.flatten()]).reshape(indices.shape)
-            
-            # Compute weights
-            batch_weights = compute_weights(distances, neighborhood_factor=neighborhood_factor)
-            
-            # Store results
-            for i, cell_idx in enumerate(batch_indices):
-                ind.loc[cell_idx, :n_neighbors_batch-1] = global_indices[i, :n_neighbors_batch-1]
-                weights.loc[cell_idx, :n_neighbors_batch-1] = batch_weights[i, :n_neighbors_batch-1]
-        
-        # Fill NaN values for cells in small batches
-        ind = ind.fillna(-1).astype(np.int64)
-        weights = weights.fillna(0.0).astype(np.float64)
-    else:
-        # Non-batch-aware computation
-        nbrs = NearestNeighbors(n_neighbors=n_neighbors, algorithm="ball_tree").fit(coords)
-        distances, indices = nbrs.kneighbors()
-        weights = compute_weights(distances, neighborhood_factor=neighborhood_factor)
-        ind = pd.DataFrame(indices, index=data.obs_names)
-        weights = pd.DataFrame(weights, index=data.obs_names, columns=ind.columns)
+    from libpysal.weights import W
+    import warnings
     
-    neighbors = ind
-    return ind, neighbors, weights
-
-
-def get_neighbor_weight_matrix(df):
-    """
-    3 columns weight matrix, first column is cell, second column is neighbor cells, third column is weight values.
-    Create {cell: [neighbors]} index dictionary
-    and {cell: [weights]} value dictionary
-    :param df:
-    :return: neighbor index dict and neighbor weight dict for pysal.lib to create a weights.W object.
-    """
-    unique_cells = sorted(df['Cell_x'].unique())
-    cell_to_index = {cell: idx for idx, cell in enumerate(unique_cells)}
-
-    df['Cell_x'] = df['Cell_x'].map(cell_to_index)
-    df['Cell_y'] = df['Cell_y'].map(cell_to_index)
-
-    nei_dict = (df.groupby('Cell_x')['Cell_y'].apply(list).to_dict())
-
-    weights_grouped = df.groupby('Cell_x')['Weight'].apply(list).to_dict()
-    w_dict = {cell: weights_grouped[cell] for cell in nei_dict}
-    return nei_dict, w_dict
-
-
-def get_w(ind, weights_n):
-    """Create a Weight object for esda program"""
-    nind = pd.DataFrame(data=ind)
-    nei = nind.transpose().to_dict('list')
-    w_dict = weights_n.reset_index(drop=True).transpose().to_dict('list')
-    from pysal.lib import weights
-    w = weights.W(nei, weights=w_dict)
+    # Convert DataFrame to numpy array if needed
+    if hasattr(neighbors_indices, 'values'):
+        neighbors_indices = neighbors_indices.values
+    
+    n_obs = neighbors_indices.shape[0]
+    neighbors_dict = {}
+    weights_dict = {}
+    
+    for i in range(n_obs):
+        # Get valid neighbors (exclude -1 and NaN values)
+        valid_mask = (~np.isnan(neighbors_indices[i])) & (neighbors_indices[i] >= 0)
+        valid_neighbors = neighbors_indices[i][valid_mask].astype(int)
+        valid_weights = weights_n.iloc[i][valid_mask].to_numpy() if hasattr(weights_n, 'iloc') else weights_n[i][valid_mask]
+        
+        if len(valid_neighbors) == 0:
+            neighbors_dict[i] = []
+            weights_dict[i] = []
+        else:
+            neighbors_dict[i] = valid_neighbors.tolist()
+            weights_dict[i] = valid_weights.tolist()
+    
+    # Create weights matrix
+    w = W(neighbors_dict, weights_dict)
+    
+    # Validate number of cells
+    if w.n != n_obs:
+        warnings.warn(f"Weights matrix has {w.n} cells, expected {n_obs}. Adjusting...")
+        for i in range(n_obs):
+            if i not in neighbors_dict:
+                neighbors_dict[i] = []
+                weights_dict[i] = []
+        w = W(neighbors_dict, weights_dict)
+    
+    # Check for disconnected components
+    if w.n_components > 1:
+        warnings.warn(f"Weights matrix has {w.n_components} disconnected components. Consider increasing n_neighbors.")
+    
     return w
 
 
 def flat_weights(cell_names, ind, weights, n_neighbors=30):
     """
-    Turn neighbor index into
-    :param cell_names:
-    :param ind:
-    :param weights:
-    :param n_neighbors:
-    :return:
+    Turn neighbor index into flattened weight matrix
+    :param cell_names: Array of cell names
+    :param ind: DataFrame or array of neighbor indices
+    :param weights: DataFrame or array of weights
+    :param n_neighbors: Number of neighbors
+    :return: pd.DataFrame with columns 'Cell_x', 'Cell_y', 'Weight'
     """
     cell1 = np.repeat(cell_names, n_neighbors)
-    cell2_indices = ind.flatten()  # starts from 0
-    cell2 = cell_names[cell2_indices]
-    print(len(cell1))
-    print(len(cell2))
-    weight = weights.to_numpy().flatten()
+    cell2_indices = ind.to_numpy().flatten() if hasattr(ind, 'to_numpy') else ind.flatten()
+    valid_mask = cell2_indices != -1  # Check for -1 as integer
+    cell1 = cell1[valid_mask]
+    cell2 = cell_names[cell2_indices[valid_mask]]
+    weight = weights.to_numpy().flatten()[valid_mask] if hasattr(weights, 'to_numpy') else weights.flatten()[valid_mask]
     df = pd.DataFrame({
         "Cell_x": cell1,
         "Cell_y": cell2,
@@ -218,23 +138,16 @@ def flat_weights(cell_names, ind, weights, n_neighbors=30):
 
 def square_weights(flat_weights_matrix):
     full_weights_matrix = pd.pivot_table(flat_weights_matrix,
-                                         index='Cell_x',
-                                         columns='Cell_y',
-                                         values='Weight',
-                                         fill_value=0)
+                                        index='Cell_x',
+                                        columns='Cell_y',
+                                        values='Weight',
+                                        fill_value=0)
     return full_weights_matrix
 
 
 def fdr(ps, axis=0):
-    """
-    Apply the Benjamini-Hochberg procedure (FDR) of an array of p-values
-    :param ps:
-    :param axis:
-    :return:
-    """
     ps = np.asarray(ps)
-    ps_in_range = (np.issubdtype(ps.dtype, np.number)
-                   and np.all(ps == np.clip(ps, 0, 1)))
+    ps_in_range = (np.issubdtype(ps.dtype, np.number) and np.all(ps == np.clip(ps, 0, 1)))
     if not ps_in_range:
         raise ValueError("`ps` must include only numbers between 0 and 1.")
     if axis is None:
@@ -248,44 +161,29 @@ def fdr(ps, axis=0):
     ps = np.moveaxis(ps, axis, -1)
     m = ps.shape[-1]
     order = np.argsort(ps, axis=-1)
-    ps = np.take_along_axis(ps, order, axis=-1)  # this copies ps
-    # Equation 1 of [1] rearranged to reject when p is less than specified q
+    ps = np.take_along_axis(ps, order, axis=-1)
     i = np.arange(1, m + 1)
     ps *= m / i
     np.minimum.accumulate(ps[..., ::-1], out=ps[..., ::-1], axis=-1)
-    # Restore original order of axes and data
     np.put_along_axis(ps, order, values=ps.copy(), axis=-1)
     ps = np.moveaxis(ps, -1, axis)
     return np.clip(ps, 0, 1)
 
 
 def cal_s0(w):
-    """
-    s0=\sum_i \sum_j w_{i,j}
-    """
     s0 = np.sum(w)
     return s0
 
 
 def cal_s1(w):
-    """
-    s1 = 1/2 * sum_i sum_j (w_ij + w_ji)^2
-    """
-    # broadcast, create w_ij + w_ji 矩阵
     w_sum = w + w.T
-    # 计算 s1
     s1 = 0.5 * np.sum(w_sum ** 2)
     return s1
 
 
 def cal_s2(w):
-    """
-    s2 = \sum_j (\sum_i w_{i,j} + \sum_i w_{j,i})^2
-    """
-    # 计算行和列的和
     row_sums = np.sum(w, axis=1)
     col_sums = np.sum(w, axis=0)
-    # 计算 \sum_i w_{i,j} + \sum_i w_{j,i} 对每个 j
     total_sums = row_sums + col_sums
     s2 = np.sum(total_sums ** 2)
     return s2
@@ -297,7 +195,7 @@ def format_gene_array(gene_array):
     return gene_array.reshape(-1)
 
 
-def cal_k(gene_expression_matrix:np.ndarray, gene_x_id, n):
+def cal_k(gene_expression_matrix: np.ndarray, gene_x_id, n):
     gene_x_exp_mean = gene_expression_matrix[:, gene_x_id].mean()
     gene_x_exp = format_gene_array(gene_expression_matrix[:, gene_x_id])
     denominator = np.square(np.sum(np.square(gene_x_exp - gene_x_exp_mean)))
@@ -306,33 +204,70 @@ def cal_k(gene_expression_matrix:np.ndarray, gene_x_id, n):
     return K
 
 
-# -----------------------------------------------------#
-# SOMDE
-# -----------------------------------------------------#
-def somde_p_values(adata, k=20, layer_key='raw_counts', latent_obsm_key="spatial"):
+def somde_p_values(adata, k=20, layer_key='raw_counts', latent_obsm_key="spatial", batch_key=None):
     if layer_key:
         exp = adata.layers[layer_key].toarray() if scipy.sparse.issparse(adata.layers[layer_key]) else adata.layers[layer_key]
     else:
         exp = adata.X.toarray() if scipy.sparse.issparse(adata.X) else adata.X
-    df = pd.DataFrame(data=exp.T,
-                      columns=adata.obs_names,
-                      index=adata.var_names)
+    df = pd.DataFrame(data=exp.T, columns=adata.obs_names, index=adata.var_names)
     cell_coordinates = adata.obsm[latent_obsm_key]
-    corinfo = pd.DataFrame({
-        "x": cell_coordinates[:, 0],
-        "y": cell_coordinates[:, 1],
-    })
+    corinfo = pd.DataFrame({"x": cell_coordinates[:, 0], "y": cell_coordinates[:, 1]})
     corinfo.index = adata.obs_names
     corinfo["total_count"] = exp.sum(1)
-    X = corinfo[['x', 'y']].values.astype(np.float32)
-    from somde import SomNode
-    som = SomNode(X, k)
-    som.mtx(df)
-    som.norm()
-    result, SVnum = som.run()
-    p_values = result.pval
+    
+    # Handle batch correction if batch_key is provided
+    if batch_key and batch_key in adata.obs.columns:
+        # Process each batch separately and combine results
+        p_values_list = []
+        batches = adata.obs[batch_key].unique()
+        
+        for batch in batches:
+            batch_mask = adata.obs[batch_key] == batch
+            batch_corinfo = corinfo.loc[batch_mask]
+            batch_df = df.loc[:, batch_mask]
+            
+            if len(batch_corinfo) < k:
+                warnings.warn(f"Batch {batch} has fewer cells ({len(batch_corinfo)}) than k={k}. Skipping this batch.")
+                continue
+                
+            X = batch_corinfo[['x', 'y']].values.astype(np.float32)
+            
+            try:
+                from somde import SomNode
+                som = SomNode(X, k)
+                som.mtx(batch_df)
+                som.norm()
+                result, SVnum = som.run()
+                p_values_list.append(result.pval)
+            except Exception as e:
+                warnings.warn(f"SOMDE failed for batch {batch}: {e}")
+                continue
+        
+        if p_values_list:
+            # Combine p-values across batches (using Fisher's method or similar)
+            from scipy.stats import combine_pvalues
+            combined_p_values = []
+            for gene_idx in range(len(adata.var_names)):
+                gene_p_values = [pvals[gene_idx] for pvals in p_values_list if gene_idx < len(pvals)]
+                if gene_p_values:
+                    _, combined_p = combine_pvalues(gene_p_values, method='fisher')
+                    combined_p_values.append(combined_p)
+                else:
+                    combined_p_values.append(1.0)  # Default high p-value
+            p_values = np.array(combined_p_values)
+        else:
+            p_values = np.ones(len(adata.var_names))  # Default high p-values
+    else:
+        X = corinfo[['x', 'y']].values.astype(np.float32)
+        from somde import SomNode
+        som = SomNode(X, k)
+        som.mtx(df)
+        som.norm()
+        result, SVnum = som.run()
+        p_values = result.pval
+        som.view()
+    
     adjusted_p_values = fdr(p_values)
-    som.view()
     return adjusted_p_values
 
 
@@ -350,266 +285,9 @@ def view(som, raw=True, c=False, line=False):
             plt.plot([som.X[i, 0], som.som.codebook[u, v, 0]], [som.X[i, 1], som.som.codebook[u, v, 1]])
     sizenum = np.reshape(sizenum, [-1, ])
     if c:
-        plt.scatter(rr[:, 0], rr[:, 1], s=sizenum, label=str(som.somn) + 'X' + str(som.somn) + ' SOM nodes',
-                    c=sizenum, cmap='hot')
+        plt.scatter(rr[:, 0], rr[:, 1], s=sizenum, label=str(som.somn) + 'X' + str(som.somn) + ' SOM nodes', c=sizenum, cmap='hot')
         plt.colorbar()
     else:
         plt.scatter(rr[:, 0], rr[:, 1], s=sizenum, label=str(som.somn) + 'X' + str(som.somn) + ' SOM nodes', c='r')
     plt.savefig('somde.png')
     plt.close()
-
-
-# -----------------------------------------------------#
-# Main
-# -----------------------------------------------------#
-# /Users/linliu/NewSpaGRN/src/spagrn/autocor.py
-#def spatial_autocorrelation(adata,
-#                            layer_key="raw_counts",
-#                            latent_obsm_key="spatial",
-#                            n_neighbors=10,
-#                            somde_k=20,
-#                            n_processes=None,
-#                            prefix='',
-#                            output_dir='.',
-#                            batch_key=None):
-#    print('Computing spatial weights matrix...')
-#    sc.pp.filter_cells(adata, min_genes=100)
-#    ind, neighbors, weights_n = neighbors_and_weights(adata,
-#                                                     latent_obsm_key=latent_obsm_key,
-#                                                     n_neighbors=n_neighbors,
-#                                                     batch_key=batch_key)
-#    Weights = get_w(ind, weights_n)
-#    print("Computing Moran's I...")
-#    morans_ps = morans_i_p_values(adata, Weights, layer_key=layer_key, n_process=n_processes)
-#    fdr_morans_ps = fdr(morans_ps)
-#    print("Computing Geary's C...")
-#    gearys_cs = gearys_c(adata, Weights, layer_key=layer_key, n_process=n_processes, mode='pvalue')
-#    fdr_gearys_cs = fdr(gearys_cs)
-#    print("Computing Getis G...")
-#    getis_gs = getis_g_p_values(adata, Weights, n_processes=n_processes, layer_key=layer_key)
-#    fdr_getis_gs = fdr(getis_gs)
-#    print('Computing SOMDE...')
-#    adjusted_p_values = somde_p_values(adata, k=somde_k, layer_key=layer_key, latent_obsm_key=latent_obsm_key)
-#    more_stats = pd.DataFrame({
-#        'C': gearys_cs,
-#        'FDR_C': fdr_gearys_cs,
-#        'I': morans_ps,
-#        'FDR_I': fdr_morans_ps,
-#        'G': getis_gs,
-#        'FDR_G': fdr_getis_gs,
-#       'FDR_SOMDE': adjusted_p_values
-#    }, index=adata.var_names)
-#    more_stats.to_csv(f'{output_dir}/{prefix}_more_stats.csv', sep='\t')
-#    return more_stats
-#
-#
-# def combind_fdrs(pvalue_df, method='fisher') -> np.array:
-#     """method options are {}"""
-#     from scipy.stats import combine_pvalues
-#     combined = np.apply_along_axis(combine_pvalues, 1, pvalue_df, method=method)[:, 1]
-#     return combined  # shape (n_gene, )
-#
-#
-# def preprocess(adata: ad.AnnData, min_genes=0, min_cells=3, min_counts=1, max_gene_num=4000):
-#     adata.var_names_make_unique()  # compute the number of genes per cell (computes ‘n_genes' column)
-#     # # find mito genes
-#     sc.pp.ﬁlter_cells(adata, min_genes=0)
-#     # add the total counts per cell as observations-annotation to adata
-#     adata.obs['n_counts'] = np.ravel(adata.X.sum(axis=1))
-#     # ﬁltering with basic thresholds for genes and cells
-#     sc.pp.ﬁlter_cells(adata, min_genes=min_genes)
-#     sc.pp.ﬁlter_genes(adata, min_cells=min_cells)
-#     sc.pp.ﬁlter_genes(adata, min_counts=min_counts)
-#     adata = adata[adata.obs['n_genes'] < max_gene_num, :]
-#     return adata
-#
-#
-#def hot(data, layer_key="raw_counts", latent_obsm_key="spatial", batch_key=None):
-#    from spagrn import hotspot
-#    hs = hotspot.Hotspot(data,
-#                         layer_key=layer_key,
-#                         model='bernoulli',
-#                         latent_obsm_key=latent_obsm_key,
-#                         batch_key=batch_key)
-#    hs.create_knn_graph(weighted_graph=False, n_neighbors=10, batch_aware=batch_key is not None)
-#    hs_results = hs.compute_autocorrelations()
-#    return hs, hs_results
-#
-#
-# def select_genes(more_stats, hs_results, fdr_threshold=0.05, combine=True):
-#     """
-#     Select genes...
-#     :param more_stats:
-#     :param hs_results:
-#     :param fdr_threshold:
-#     :param combine: To select genes, combine p-values then choose genes have
-#     :return:
-#     """
-#     # if combine:
-#     more_stats['FDR'] = hs_results.FDR
-#     cfdrs = combind_fdrs(more_stats[['FDR_C', 'FDR_I', 'FDR_G', 'FDR_SOMDE', 'FDR']])
-#     more_stats['combined'] = cfdrs
-#     cgenes = more_stats.loc[more_stats['combined'] < fdr_threshold].index
-#     print(f"Combinded FDRs gives: {len(cgenes)} genes")  # 6961
-#     # return genes
-#     # else:
-#     moran_genes = more_stats.loc[more_stats.FDR_I < fdr_threshold].index
-#     geary_genes = more_stats.loc[more_stats.FDR_C < fdr_threshold].index
-#     getis_genes = more_stats.loc[more_stats.FDR_G < fdr_threshold].index
-#     somde_genes = more_stats.loc[more_stats.FDR_SOMDE < fdr_threshold].index
-#     hs_genes = hs_results.loc[(hs_results.FDR < fdr_threshold)].index
-#     inter_genes = set.intersection(set(moran_genes), set(geary_genes), set(getis_genes), set(somde_genes))
-#     print(f"Moran's I find {len(moran_genes)} genes")  # 3860
-#     print(f"Geary's C find {len(geary_genes)} genes")  # 7063
-#     print(f'getis find {len(getis_genes)} genes')  # 4285
-#     print(f'SOMDE find {len(somde_genes)} genes')  # 2593
-#     print(f'intersection gene num: {len(inter_genes)}')  # 3416
-#     # check somde results
-#     t = set(somde_genes).intersection(set(hs_genes))
-#     print(f'SOMDE genes {len(t)} in hs_genes')
-#     # select
-#     genes = inter_genes.intersection(set(hs_genes))
-#     print(f'4 methods: inter_genes intersection with FDR genes: {len(genes)}')
-#     global_genes = set.intersection(set(moran_genes), set(geary_genes), set(getis_genes)).intersection(set(hs_genes))
-#     print(f'Global inter_genes intersection with FDR genes: {len(genes)}')  # 2728
-#     return genes
-#
-#
-# /Users/linliu/NewSpaGRN/src/spagrn/autocor.py
-#def main(prefix,
-#         fn,
-#         output_dir,
-#         n_process=4,
-#         min_genes=0,
-#         min_cells=3,
-#         min_counts=1,
-#         layer_key=None,
-#         latent_obsm_key="spatial",
-#         n_neighbors=10,
-#         somde_k=20,
-#         batch_key=None):
-#    adata = sc.read_h5ad(fn)
-#    adata = preprocess(adata, min_genes=min_genes, min_cells=min_cells, min_counts=min_counts)
-#    hs, hs_results = hot(adata, layer_key=layer_key, latent_obsm_key=latent_obsm_key, batch_key=batch_key)
-#    more_stats = spatial_autocorrelation(adata,
-#                                        layer_key=layer_key,
-#                                        latent_obsm_key=latent_obsm_key,
-#                                        n_neighbors=n_neighbors,
-#                                        somde_k=somde_k,
-#                                        n_processes=n_process,
-#                                        prefix=prefix,
-#                                        output_dir=output_dir,
-#                                        batch_key=batch_key)
-#    select_genes(more_stats, hs_results, fdr_threshold=0.05, combine=False)
-#
-#
-# /Users/linliu/NewSpaGRN/src/spagrn/autocor.py
-#if __name__ == '__main__':
-#    project_id = sys.argv[1]
-#    batch_key = sys.argv[2] if len(sys.argv) > 2 else None
-#    if project_id == 'E14':
-#        fn = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/DATA/fly_pca/E14-16h_pca.h5ad'
-#        output_dir = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/exp/13.revision/E14-16h'
-#        prefix = 'E14-16h'
-#        print(f'Running for {prefix} project...')
-#        main(prefix, fn, output_dir, n_process=3, layer_key="raw_counts",
-#             latent_obsm_key="spatial", n_neighbors=10, somde_k=20, batch_key=batch_key)
-#     elif project_id == 'E16':
-#         fn = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/DATA/fly_pca/E16-18h_pca.h5ad'
-#         output_dir = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/exp/13.revision/E16-18h'
-#         prefix = 'E16-18h'
-#         print(f'Running for {prefix} project...')
-#         main(prefix, fn, output_dir, n_process=3, layer_key="raw_counts", latent_obsm_key="spatial", n_neighbors=10, somde_k=20)
-#     elif project_id == 'L1':
-#         fn = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/DATA/fly_pca/L1_pca.h5ad'
-#         output_dir = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/exp/13.revision/L1'
-#         prefix = 'L1'
-#         print(f'Running for {prefix} project...')
-#         main(prefix, fn, output_dir, n_process=3, layer_key="raw_counts", latent_obsm_key="spatial", n_neighbors=10, somde_k=20)
-#     elif project_id == 'L2':
-#         fn = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/DATA/fly_pca/L2_pca.h5ad'
-#         output_dir = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/exp/13.revision/L2'
-#         prefix = 'L2'
-#         print(f'Running for {prefix} project...')
-#         main(prefix, fn, output_dir, n_process=3, layer_key="raw_counts", latent_obsm_key="spatial", n_neighbors=10, somde_k=20)
-#     elif project_id == 'L3':
-#         fn = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/DATA/fly_pca/L3_pca.h5ad'
-#         output_dir = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/exp/13.revision/L3'
-#         prefix = 'L3'
-#         print(f'Running for {prefix} project...')
-#         main(prefix, fn, output_dir, n_process=3, layer_key="raw_counts", latent_obsm_key="spatial", n_neighbors=10, somde_k=20)
-#
-#     project_id = int(project_id)
-#     # 1. dryad.8t8s248, MERFISH, 2024-07-16
-#     # mouse brain, preoptic region
-#     if project_id == 1:
-#         fn = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/exp/13.revision/1.merfish/Moffitt_and_Bambah-Mukku_et_al_merfish_all_cells.h5ad'
-#         output_dir = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/exp/13.revision/1.merfish'
-#         prefix = 'merfish'
-#         print(f'Running for {prefix} project...')
-#         main(prefix, fn, output_dir, n_process=20, layer_key=None,latent_obsm_key="spatial",n_neighbors=10,somde_k=20)
-#
-#     # 2. zenodo.7551712, 10X Visium, human colorectal cancer (CRC)
-#     # 7 individuals; two samples per patient
-#     # GRN: using known TF-target interactions from DoRothEA
-#     # GRCh38
-#     elif project_id == 2:
-#         fn = '/zfsqd1/ST_OCEAN/USRS/hankai/database/SpaGRN/zenodo.7551712/DeconvolutionResults_ST_CRC_BelgianCohort/sp.h5ad'
-#         output_dir = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/exp/13.revision/2.zenodo.7551712_BelgianCohort'
-#         prefix = 'zenodo.7551712_BelgianCohort'
-#         print(f'Running for [{prefix}] project...')
-#         main(prefix, fn, output_dir, n_process=3, min_genes=10, min_cells=50, min_counts=10, layer_key=None, latent_obsm_key="spatial", n_neighbors=10, somde_k=20)
-#     elif project_id == 3:
-#         fn = '/zfsqd1/ST_OCEAN/USRS/hankai/database/SpaGRN/zenodo.7551712/DeconvolutionResults_ST_CRC_KoreanCohort/sp.h5ad'
-#         output_dir = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/exp/13.revision/3.zenodo.7551712_KoreanCohort'
-#         prefix = 'zenodo.7551712_KoreanCohort'
-#         print(f'Running for [{prefix}] project...')
-#         main(prefix, fn, output_dir, n_process=3, min_genes=10, min_cells=50, min_counts=10, layer_key=None,
-#              latent_obsm_key="spatial", n_neighbors=10, somde_k=20)
-#     elif project_id == 4:
-#         fn = '/zfsqd1/ST_OCEAN/USRS/hankai/database/SpaGRN/zenodo.7551712/DeconvolutionResults_ST_CRC_LiverMetastasis/sp.h5ad'
-#         output_dir = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/exp/13.revision/4.zenodo.7551712_LiverMetastasis'
-#         prefix = 'zenodo.7551712_LiverMetastasis'
-#         print(f'Running for [{prefix}] project...')
-#         main(prefix, fn, output_dir, n_process=3, min_genes=10, min_cells=50, min_counts=10, layer_key=None,
-#              latent_obsm_key="spatial", n_neighbors=10, somde_k=20)
-#
-#     # 3. human ovarian tumour
-#     # 10X Visium (GSE211956) & CosMx (zenodo.8287970)
-#     # High-grade serous ovarian tumours from 10 patients diagnosed with stage III-IV cancers
-#     elif project_id == 5:
-#         fn = '/zfsqd1/ST_OCEAN/USRS/hankai/database/SpaGRN/zenodo.7551712/DeconvolutionResults_ST_CRC_LiverMetastasis/sp.h5ad'
-#         output_dir = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/exp/13.revision/5.zenodo.7551712_LiverMetastasis'
-#         prefix = 'zenodo.7551712_LiverMetastasis'
-#         print(f'Running for [{prefix}] project...')
-#         main(prefix, fn, output_dir, n_process=3, min_genes=10, min_cells=50, min_counts=10, layer_key=None,
-#              latent_obsm_key="spatial", n_neighbors=10, somde_k=20)
-#     elif project_id == 6:
-#         fn = '/zfsqd1/ST_OCEAN/USRS/hankai/database/SpaGRN/zenodo.7551712/DeconvolutionResults_ST_CRC_LiverMetastasis/sp.h5ad'
-#         output_dir = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/exp/13.revision/5.zenodo.7551712_LiverMetastasis'
-#         prefix = 'zenodo.7551712_LiverMetastasis'
-#         print(f'Running for [{prefix}] project...')
-#         main(prefix, fn, output_dir, n_process=3, min_genes=10, min_cells=50, min_counts=10, layer_key=None,
-#              latent_obsm_key="spatial", n_neighbors=10, somde_k=20)
-#
-#     # 4. mouse, CosMx, brain with PFF induced PD
-#     # 1 female and 2 male mic
-#     # zenodo.10729766
-#     elif project_id == 6:
-#         fn = '/zfsqd1/ST_OCEAN/USRS/hankai/database/SpaGRN/zenodo.10729766/seurat_object_3mon.rds'
-#         output_dir = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/exp/13.revision/6.zenodo.10729766_mouse_brain'
-#         prefix = 'zenodo.10729766_mouse_brain'
-#         print(f'Running for [{prefix}] project...')
-#         main(prefix, fn, output_dir, n_process=3, min_genes=1, min_cells=3, min_counts=1, layer_key=None,
-#              latent_obsm_key="spatial", n_neighbors=10, somde_k=20)
-#
-#     # 5. zenodo.8063124
-#     # human, Clear cell renal cell carcinoma (ccRCC)
-#     # 12 tumor sections and 2 NAT controls
-#     elif project_id == 7:
-#         fn = '/zfsqd1/ST_OCEAN/USRS/hankai/database/SpaGRN/zenodo.10729766/seurat_object_3mon.rds'
-#         output_dir = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/exp/13.revision/7.zenodo.8063124_human'
-#         prefix = 'zenodo.10729766_mouse_brain'
-#         print(f'Running for [{prefix}] project...')
-#         main(prefix, fn, output_dir, n_process=3, min_genes=1, min_cells=3, min_counts=1, layer_key=None,
-#              latent_obsm_key="spatial", n_neighbors=10, somde_k=20)
