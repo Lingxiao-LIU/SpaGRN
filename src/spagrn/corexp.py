@@ -14,6 +14,9 @@ import scipy
 from scipy.sparse import csr_matrix, issparse
 import multiprocessing
 from tqdm import tqdm
+from .knn import neighbors_and_weights_batch_aware, neighbors_and_weights
+from .autocor import flat_weights  # Import flat_weights from autocor.py
+import warnings
 
 
 # --------------------- CO-EXPRESSION --------------------------
@@ -26,42 +29,162 @@ def format_gene_array(gene_array):
 class D:
     def __init__(self):
         pass
-# Bivariate Moran's R
-def bv_moran_r(gene_x_id, gene_y_id, cell_x_id, cell_y_id, wij, mtx):
-    """Compute bivariate Moran's R value of two given genes"""
-    # 3 get average
-    gene_x_exp_mean = mtx[:, gene_x_id].mean()
-    gene_y_exp_mean = mtx[:, gene_y_id].mean()
-    # 4 calculate denominator
+
+# Bivariate Moran's R with batch correction
+def bv_moran_r_batch_corrected(gene_x_id, gene_y_id, cell_x_id, cell_y_id, wij, mtx, batches=None):
+    """Compute batch-corrected bivariate Moran's R value of two given genes"""
     gene_x_exp = format_gene_array(mtx[:, gene_x_id])
     gene_y_exp = format_gene_array(mtx[:, gene_y_id])
-    denominator = np.sqrt(np.square(gene_x_exp - gene_x_exp_mean).sum()) * \
-                  np.sqrt(np.square(gene_y_exp - gene_y_exp_mean).sum())
-    # 5 calulate numerator
+    
+    if batches is not None:
+        # Compute batch-corrected means
+        gene_x_exp_mean = compute_batch_corrected_mean(gene_x_exp, batches)
+        gene_y_exp_mean = compute_batch_corrected_mean(gene_y_exp, batches)
+        
+        # Compute batch-corrected variances for denominator
+        gene_x_var = compute_batch_corrected_variance(gene_x_exp, batches, gene_x_exp_mean)
+        gene_y_var = compute_batch_corrected_variance(gene_y_exp, batches, gene_y_exp_mean)
+        denominator = np.sqrt(gene_x_var) * np.sqrt(gene_y_var)
+    else:
+        # Original computation without batch correction
+        gene_x_exp_mean = gene_x_exp.mean()
+        gene_y_exp_mean = gene_y_exp.mean()
+        denominator = np.sqrt(np.square(gene_x_exp - gene_x_exp_mean).sum()) * \
+                      np.sqrt(np.square(gene_y_exp - gene_y_exp_mean).sum())
+    
+    # Calculate numerator with batch-corrected means
     gene_x_in_cell_i = format_gene_array(mtx[cell_x_id, gene_x_id])
     gene_y_in_cell_j = format_gene_array(mtx[cell_y_id, gene_y_id])
     numerator = np.sum(wij * (gene_x_in_cell_i - gene_x_exp_mean) * (gene_y_in_cell_j - gene_y_exp_mean))
+    
+    if denominator == 0:
+        return 0
     return numerator / denominator
 
 
+# Bivariate Geary's C with batch correction
+def bv_geary_c_batch_corrected(gene_x_id, gene_y_id, cell_x_id, cell_y_id, wij, mtx, batches=None):
+    """Compute batch-corrected bivariate Geary's C value of two given genes"""
+    gene_x_exp = format_gene_array(mtx[:, gene_x_id])
+    gene_y_exp = format_gene_array(mtx[:, gene_y_id])
+    
+    if batches is not None:
+        # Compute batch-corrected means
+        gene_x_exp_mean = compute_batch_corrected_mean(gene_x_exp, batches)
+        gene_y_exp_mean = compute_batch_corrected_mean(gene_y_exp, batches)
+        
+        # Compute batch-corrected variances for denominator
+        gene_x_var = compute_batch_corrected_variance(gene_x_exp, batches, gene_x_exp_mean)
+        gene_y_var = compute_batch_corrected_variance(gene_y_exp, batches, gene_y_exp_mean)
+        denominator = np.sqrt(gene_x_var) * np.sqrt(gene_y_var)
+    else:
+        # Original computation without batch correction
+        gene_x_exp_mean = gene_x_exp.mean()
+        gene_y_exp_mean = gene_y_exp.mean()
+        denominator = np.sqrt(np.square(gene_x_exp - gene_x_exp_mean).sum()) * \
+                      np.sqrt(np.square(gene_y_exp - gene_y_exp_mean).sum())
+    
+    # Calculate numerator
+    gene_x_in_cell_i = format_gene_array(mtx[cell_x_id, gene_x_id])
+    gene_x_in_cell_j = format_gene_array(mtx[cell_y_id, gene_x_id])
+    gene_y_in_cell_i = format_gene_array(mtx[cell_x_id, gene_y_id])
+    gene_y_in_cell_j = format_gene_array(mtx[cell_y_id, gene_y_id])
+    numerator = np.sum(wij * (gene_x_in_cell_i - gene_x_in_cell_j) * (gene_y_in_cell_i - gene_y_in_cell_j))
+    
+    if denominator == 0:
+        return 0
+    return numerator / denominator
+
+
+def compute_batch_corrected_mean(gene_exp, batches):
+    """Compute batch-corrected mean by averaging within-batch means"""
+    if batches is None:
+        return gene_exp.mean()
+    
+    unique_batches = np.unique(batches)
+    batch_means = []
+    
+    for batch in unique_batches:
+        batch_mask = batches == batch
+        if np.sum(batch_mask) > 0:
+            batch_means.append(gene_exp[batch_mask].mean())
+    
+    return np.mean(batch_means) if batch_means else gene_exp.mean()
+
+
+def compute_batch_corrected_variance(gene_exp, batches, overall_mean):
+    """Compute batch-corrected variance"""
+    if batches is None:
+        return np.square(gene_exp - overall_mean).sum()
+    
+    unique_batches = np.unique(batches)
+    total_var = 0
+    
+    for batch in unique_batches:
+        batch_mask = batches == batch
+        if np.sum(batch_mask) > 1:  # Need at least 2 cells for variance
+            batch_exp = gene_exp[batch_mask]
+            batch_var = np.square(batch_exp - overall_mean).sum()
+            total_var += batch_var
+    
+    return total_var if total_var > 0 else np.square(gene_exp - overall_mean).sum()
+
+
+# Original functions for backward compatibility
+def bv_moran_r(gene_x_id, gene_y_id, cell_x_id, cell_y_id, wij, mtx):
+    """Compute bivariate Moran's R value of two given genes"""
+    return bv_moran_r_batch_corrected(gene_x_id, gene_y_id, cell_x_id, cell_y_id, wij, mtx, batches=None)
+
+
+def bv_geary_c(gene_x_id, gene_y_id, cell_x_id, cell_y_id, wij, mtx):
+    """Compute bivariate Geary's C value of two given genes"""
+    return bv_geary_c_batch_corrected(gene_x_id, gene_y_id, cell_x_id, cell_y_id, wij, mtx, batches=None)
+
+
 def compute_pairs_m(args):
-    """Apply function on two genes"""
-    gene_names, gene_x_id, gene_y_id, cell_x_id, cell_y_id, wij, mtx = args
-    value = bv_moran_r(gene_x_id, gene_y_id, cell_x_id, cell_y_id, wij, mtx)
+    """Apply function on two genes for Moran's I"""
+    gene_names, gene_x_id, gene_y_id, cell_x_id, cell_y_id, wij, mtx, batches = args
+    value = bv_moran_r_batch_corrected(gene_x_id, gene_y_id, cell_x_id, cell_y_id, wij, mtx, batches)
     tf = gene_names[gene_x_id]
     gene = gene_names[gene_y_id]
     return tf, gene, value
 
 
-def global_bivariate_moran_R(adata, weights: pd.DataFrame, tfs_in_data: list, select_genes: list, layer_key='raw_counts', num_workers: int = 4) -> pd.DataFrame:
+def compute_pairs_c(args):
+    """Apply function on two genes for Geary's C"""
+    gene_names, gene_x_id, gene_y_id, cell_x_id, cell_y_id, wij, mtx, batches = args
+    value = bv_geary_c_batch_corrected(gene_x_id, gene_y_id, cell_x_id, cell_y_id, wij, mtx, batches)
+    tf = gene_names[gene_x_id]
+    gene = gene_names[gene_y_id]
+    return tf, gene, value
+
+
+def global_bivariate_moran_R(adata, weights: pd.DataFrame, tfs_in_data: list, select_genes: list, 
+                           layer_key='raw_counts', num_workers: int = 4, batch_key=None) -> pd.DataFrame:
     """
-    :param adata:
-    :param weights:
-    :param tfs_in_data:
-    :param select_genes:
-    :param layer_key:
-    :param num_workers:
-    :return:
+    Compute global bivariate Moran's R with optional batch correction
+    
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        Annotated data object
+    weights : pd.DataFrame
+        Spatial weights matrix
+    tfs_in_data : list
+        List of transcription factors
+    select_genes : list
+        List of genes to analyze
+    layer_key : str
+        Layer to use for expression data
+    num_workers : int
+        Number of parallel workers
+    batch_key : str, optional
+        Key in adata.obs containing batch labels
+        
+    Returns
+    -------
+    pd.DataFrame
+        Results dataframe with TF-target correlations
     """
     gene_names = adata.var.index
     # 1 gene name to matrix id
@@ -72,16 +195,27 @@ def global_bivariate_moran_R(adata, weights: pd.DataFrame, tfs_in_data: list, se
     tmp_obs['id'] = np.arange(len(adata.obs))
     cell_x_id = tmp_obs.loc[weights['Cell_x'].to_list()]['id'].to_numpy()
     cell_y_id = tmp_obs.loc[weights['Cell_y'].to_list()]['id'].to_numpy()
+    
     if layer_key:
-        mtx = adata.layers[layer_key].toarray() if scipy.sparse.issparse(adata.layers[layer_key]) else adata.layers[
-            layer_key]
+        mtx = adata.layers[layer_key].toarray() if scipy.sparse.issparse(adata.layers[layer_key]) else adata.layers[layer_key]
     else:
         mtx = adata.X.toarray() if scipy.sparse.issparse(adata.X) else adata.X
+    
     wij = weights['Weight'].to_numpy()
+    
+    # Get batch information if provided
+    batches = None
+    if batch_key and batch_key in adata.obs.columns:
+        batches = adata.obs[batch_key].values
+        print(f"Using batch correction with batch key: {batch_key}")
+    
     start_time = time.time()
-    pool_args = [(gene_names, gene_x_id, gene_y_id, cell_x_id, cell_y_id, wij, mtx) for gene_x_id in tf_ids for gene_y_id in target_ids]
+    pool_args = [(gene_names, gene_x_id, gene_y_id, cell_x_id, cell_y_id, wij, mtx, batches) 
+                 for gene_x_id in tf_ids for gene_y_id in target_ids]
+    
     with multiprocessing.Pool(processes=num_workers) as pool:
         results = pool.map(compute_pairs_m, pool_args)
+    
     results_df = pd.DataFrame(results, columns=['TF', 'target', 'importance'])
     end_time = time.time()
     total_time = end_time - start_time
@@ -89,43 +223,32 @@ def global_bivariate_moran_R(adata, weights: pd.DataFrame, tfs_in_data: list, se
     return results_df
 
 
-# Bivariate Greay's C
-def bv_geary_c(gene_x_id, gene_y_id, cell_x_id, cell_y_id, wij, mtx):
-    """Compute bivariate Geary's C value of two given genes"""
-    gene_x_exp_mean = mtx[:, gene_x_id].mean()
-    gene_y_exp_mean = mtx[:, gene_y_id].mean()
-    # 4 calculate denominator
-    gene_x_exp = format_gene_array(mtx[:, gene_x_id])
-    gene_y_exp = format_gene_array(mtx[:, gene_y_id])
-    denominator = np.sqrt(np.square(gene_x_exp - gene_x_exp_mean).sum()) * \
-                  np.sqrt(np.square(gene_y_exp - gene_y_exp_mean).sum())
-    # 5 calulate numerator
-    gene_x_in_cell_i = format_gene_array(mtx[cell_x_id, gene_x_id])
-    gene_x_in_cell_j = format_gene_array(mtx[cell_y_id, gene_x_id])
-    gene_y_in_cell_i = format_gene_array(mtx[cell_x_id, gene_y_id])
-    gene_y_in_cell_j = format_gene_array(mtx[cell_y_id, gene_y_id])
-    numerator = np.sum(wij * (gene_x_in_cell_i - gene_x_in_cell_j) * (gene_y_in_cell_i - gene_y_in_cell_j))
-    return numerator / denominator
-
-
-def compute_pairs_c(args):
-    """Apply function on two genes"""
-    gene_names, gene_x_id, gene_y_id, cell_x_id, cell_y_id, wij, mtx = args
-    value = bv_geary_c(gene_x_id, gene_y_id, cell_x_id, cell_y_id, wij, mtx)
-    tf = gene_names[gene_x_id]
-    gene = gene_names[gene_y_id]
-    return tf, gene, value
-
-
-def global_bivariate_gearys_C(adata, weights: pd.DataFrame, tfs_in_data: list, select_genes: list, layer_key='raw_counts', num_workers: int = 4) -> pd.DataFrame:
+def global_bivariate_gearys_C(adata, weights: pd.DataFrame, tfs_in_data: list, select_genes: list, 
+                            layer_key='raw_counts', num_workers: int = 4, batch_key=None) -> pd.DataFrame:
     """
-    :param adata:
-    :param weights:
-    :param tfs_in_data:
-    :param select_genes:
-    :param layer_key:
-    :param num_workers:
-    :return:
+    Compute global bivariate Geary's C with optional batch correction
+    
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        Annotated data object
+    weights : pd.DataFrame
+        Spatial weights matrix
+    tfs_in_data : list
+        List of transcription factors
+    select_genes : list
+        List of genes to analyze
+    layer_key : str
+        Layer to use for expression data
+    num_workers : int
+        Number of parallel workers
+    batch_key : str, optional
+        Key in adata.obs containing batch labels
+        
+    Returns
+    -------
+    pd.DataFrame
+        Results dataframe with TF-target correlations
     """
     gene_names = adata.var.index
     # 1 gene name to matrix id
@@ -136,20 +259,32 @@ def global_bivariate_gearys_C(adata, weights: pd.DataFrame, tfs_in_data: list, s
     tmp_obs['id'] = np.arange(len(adata.obs))
     cell_x_id = tmp_obs.loc[weights['Cell_x'].to_list()]['id'].to_numpy()
     cell_y_id = tmp_obs.loc[weights['Cell_y'].to_list()]['id'].to_numpy()
-    # 3 get average
+    
+    # 3 get expression matrix
     if layer_key:
         mtx = adata.layers[layer_key].toarray() if scipy.sparse.issparse(adata.layers[layer_key]) else adata.layers[layer_key]
     else:
         mtx = adata.X.toarray() if scipy.sparse.issparse(adata.X) else adata.X
+    
     wij = weights['Weight'].to_numpy()
+    
+    # Get batch information if provided
+    batches = None
+    if batch_key and batch_key in adata.obs.columns:
+        batches = adata.obs[batch_key].values
+        print(f"Using batch correction with batch key: {batch_key}")
+    
     start_time = time.time()
-    pool_args = [(gene_names, gene_x_id, gene_y_id, cell_x_id, cell_y_id, wij, mtx) for gene_x_id in tf_ids for gene_y_id in target_ids]
+    pool_args = [(gene_names, gene_x_id, gene_y_id, cell_x_id, cell_y_id, wij, mtx, batches) 
+                 for gene_x_id in tf_ids for gene_y_id in target_ids]
+    
     with multiprocessing.Pool(processes=num_workers) as pool:
         results = pool.map(compute_pairs_c, pool_args)
+    
     results_df = pd.DataFrame(results, columns=['TF', 'target', 'importance'])
     end_time = time.time()
     total_time = end_time - start_time
-    print(f"run_in_parallel_m: Total time taken: {total_time:.4f} seconds")
+    print(f"run_in_parallel_c: Total time taken: {total_time:.4f} seconds")
     return results_df
 
 
@@ -162,15 +297,15 @@ def preprocess(adata: ad.AnnData, min_genes=0, min_cells=3, min_counts=1, max_ge
     :param max_gene_num:
     :return: a anndata.AnnData
     """
-    adata.var_names_make_unique()  # compute the number of genes per cell (computes ‘n_genes' column)
+    adata.var_names_make_unique()  # compute the number of genes per cell (computes â€˜n_genes' column)
     # # find mito genes
-    sc.pp.ﬁlter_cells(adata, min_genes=0)
+    sc.pp.filter_cells(adata, min_genes=0)
     # add the total counts per cell as observations-annotation to adata
     adata.obs['n_counts'] = np.ravel(adata.X.sum(axis=1))
-    # ﬁltering with basic thresholds for genes and cells
-    sc.pp.ﬁlter_cells(adata, min_genes=min_genes)
-    sc.pp.ﬁlter_genes(adata, min_cells=min_cells)
-    sc.pp.ﬁlter_genes(adata, min_counts=min_counts)
+    # filtering with basic thresholds for genes and cells
+    sc.pp.filter_cells(adata, min_genes=min_genes)
+    sc.pp.filter_genes(adata, min_cells=min_cells)
+    sc.pp.filter_genes(adata, min_counts=min_counts)
     adata = adata[adata.obs['n_genes'] < max_gene_num, :]
     return adata
 
@@ -193,52 +328,68 @@ def compute_weights(distances, neighborhood_factor=3):
     return weights
 
 
-def neighbors_and_weights(data,
-                          latent_obsm_key="spatial",
-                          n_neighbors=10,
-                          neighborhood_factor=3):
-    """
-    :param data:
-    :param latent_obsm_key:
-    :param n_neighbors:
-    :param neighborhood_factor:
-    :param approx_neighbors:
-    :return:
-    """
-    from sklearn.neighbors import NearestNeighbors
-    coords = data.obsm[latent_obsm_key]
-    # get Nearest n Neighbors
-    nbrs = NearestNeighbors(n_neighbors=n_neighbors, algorithm="ball_tree").fit(coords)
-    dist, ind = nbrs.kneighbors()  # neighbor name and index
-    # get spatial weights between two points
-    weights = compute_weights(
-        dist, neighborhood_factor=neighborhood_factor)
-    ind_df = pd.DataFrame(ind, index=data.obs_names)
-    neighbors = ind_df
-    weights = pd.DataFrame(weights, index=neighbors.index,
-                           columns=neighbors.columns)
-    return ind, neighbors, weights
 
-
-def flat_weights(cell_names, ind, weights, n_neighbors=30):
+def get_spatial_weights(adata, latent_obsm_key="spatial", n_neighbors=10, batch_key=None, 
+                       neighborhood_factor=3, approx_neighbors=True):
     """
-    Turn neighbor index into
-    :param cell_names:
-    :param ind:
-    :param weights:
-    :param n_neighbors:
-    :return:
+    Compute spatial weights with optional batch correction
+    
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        Annotated data object
+    latent_obsm_key : str
+        Key in adata.obsm for latent coordinates
+    n_neighbors : int
+        Number of neighbors
+    batch_key : str, optional
+        Key in adata.obs containing batch labels
+    neighborhood_factor : int
+        Factor for computing weights
+    approx_neighbors : bool
+        Whether to use approximate neighbors
+        
+    Returns
+    -------
+    pd.DataFrame
+        Flattened weights matrix
     """
-    cell1 = np.repeat(cell_names, n_neighbors)
-    cell2_indices = ind.flatten()  # starts from 0
-    cell2 = cell_names[cell2_indices]
-    weight = weights.to_numpy().flatten()
-    df = pd.DataFrame({
-        "Cell_x": cell1,
-        "Cell_y": cell2,
-        "Weight": weight
-    })
-    return df
+    if latent_obsm_key not in adata.obsm:
+        raise ValueError(f"Key '{latent_obsm_key}' not found in adata.obsm")
+    
+    latent = pd.DataFrame(adata.obsm[latent_obsm_key], index=adata.obs_names)
+    
+    # Use batch-aware neighbors if batch_key is provided
+    if batch_key and batch_key in adata.obs.columns:
+        print(f"Computing batch-aware spatial weights with batch key: {batch_key}")
+        neighbors, weights_n = neighbors_and_weights_batch_aware(
+            latent,
+            n_neighbors=n_neighbors,
+            neighborhood_factor=neighborhood_factor,
+            approx_neighbors=approx_neighbors,
+            batch_key=batch_key,
+            adata=adata
+        )
+        
+        # Convert neighbor names to indices
+        name_to_idx = {name: idx for idx, name in enumerate(adata.obs_names)}
+        ind = neighbors.applymap(lambda x: name_to_idx.get(x, -1)).values
+    else:
+        print("Computing standard spatial weights...")
+        neighbors, weights_n = neighbors_and_weights(
+            latent,
+            n_neighbors=n_neighbors,
+            neighborhood_factor=neighborhood_factor,
+            approx_neighbors=approx_neighbors,
+        )
+        
+        # Convert neighbor names to indices
+        name_to_idx = {name: idx for idx, name in enumerate(adata.obs_names)}
+        ind = neighbors.applymap(lambda x: name_to_idx.get(x, -1)).values
+    
+    cell_names = adata.obs_names
+    fw = flat_weights(cell_names, ind, weights_n, n_neighbors=n_neighbors)
+    return fw
 
 
 def get_p_M(I, adata, weights, gene_x, gene_y, permutation_num=99):
@@ -275,7 +426,34 @@ def get_p_C(C, adata, weights, gene_x, gene_y, permutation_num=99):
     return p_sim
 
 
-def main(data_fn, tfs_fn, genes_fn, layer_key='raw_counts', latent_obsm_key="spatial", n_neighbors=10, fw_fn=None, output_dir='.', num_workers=6):
+def main(data_fn, tfs_fn, genes_fn, layer_key='raw_counts', latent_obsm_key="spatial", 
+         n_neighbors=10, fw_fn=None, output_dir='.', num_workers=6, batch_key=None):
+    """
+    Main function with batch correction support
+    
+    Parameters
+    ----------
+    data_fn : str
+        Path to h5ad file
+    tfs_fn : str
+        Path to transcription factors file
+    genes_fn : str
+        Path to genes file
+    layer_key : str
+        Layer to use for expression data
+    latent_obsm_key : str
+        Key in adata.obsm for spatial coordinates
+    n_neighbors : int
+        Number of neighbors
+    fw_fn : str, optional
+        Path to precomputed weights file
+    output_dir : str
+        Output directory
+    num_workers : int
+        Number of parallel workers
+    batch_key : str, optional
+        Key in adata.obs containing batch labels
+    """
     print('Loading experimental data...')
     adata = sc.read_h5ad(data_fn)
     adata = preprocess(adata)
@@ -286,32 +464,52 @@ def main(data_fn, tfs_fn, genes_fn, layer_key='raw_counts', latent_obsm_key="spa
     print(f'{len(tfs_in_data)} TFs in data')
     select_genes_not_tfs = list(set(select_genes) - set(tfs_in_data))
     print(f'{len(select_genes_not_tfs)} genes to use.')
+    
+    # Check for batch information
+    if batch_key and batch_key in adata.obs.columns:
+        print(f"Found batch information in '{batch_key}': {adata.obs[batch_key].nunique()} batches")
+    elif batch_key:
+        warnings.warn(f"Batch key '{batch_key}' not found in adata.obs. Proceeding without batch correction.")
+        batch_key = None
+    
     # ---- Weights
     if fw_fn:
         fw = pd.read_csv(fw_fn)
+        print('Loaded precomputed weights.')
     else:
         print('Computing spatial weights matrix...')
-        ind, neighbors, weights_n = neighbors_and_weights(adata, latent_obsm_key=latent_obsm_key, n_neighbors=n_neighbors)
-        cell_names = adata.obs_names
-        print('Shifting spatial weight matrix shape...')
-        fw = flat_weights(cell_names, ind, weights_n, n_neighbors=n_neighbors)
+        fw = get_spatial_weights(
+            adata, 
+            latent_obsm_key=latent_obsm_key, 
+            n_neighbors=n_neighbors,
+            batch_key=batch_key
+        )
         fw.to_csv(f'{output_dir}/flat_weights.csv', index=False)
-    # --- TEST BV
-    print("Computing global bivariate geary'C value in parallel...")
-    local_correlations_bv_gc = global_bivariate_gearys_C(adata,
-                                                         fw,
-                                                         tfs_in_data,
-                                                         select_genes,
-                                                         num_workers=num_workers,
-                                                         layer_key=layer_key)
+        print('Saved spatial weights matrix.')
+    
+    # --- Compute bivariate statistics with batch correction
+    print("Computing global bivariate Geary's C value in parallel...")
+    local_correlations_bv_gc = global_bivariate_gearys_C(
+        adata,
+        fw,
+        tfs_in_data,
+        select_genes,
+        num_workers=num_workers,
+        layer_key=layer_key,
+        batch_key=batch_key
+    )
     local_correlations_bv_gc.to_csv(f'{output_dir}/local_correlations_bv_gc.csv', index=None)
+    
     print("Computing global bivariate Moran's R value in parallel...")
-    local_correlations_bv_mr = global_bivariate_moran_R(adata,
-                                                        fw,
-                                                        tfs_in_data,
-                                                        select_genes,
-                                                        num_workers=num_workers,
-                                                        layer_key=layer_key)
+    local_correlations_bv_mr = global_bivariate_moran_R(
+        adata,
+        fw,
+        tfs_in_data,
+        select_genes,
+        num_workers=num_workers,
+        layer_key=layer_key,
+        batch_key=batch_key
+    )
     local_correlations_bv_mr.to_csv(f'{output_dir}/local_correlations_bv_mr.csv', index=None)
 
 
@@ -330,5 +528,8 @@ if __name__ == '__main__':
         genes_fn = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/exp/13.revision/mouse_brain/global_genes.txt'
         fw_fn = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/exp/13.revision/mouse_brain/flat_weights.csv'
         output_dir = f'/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/exp/13.revision/{project_id}'
-        main(data_fn, tfs_fn, genes_fn, layer_key='counts', latent_obsm_key="spatial", n_neighbors=10, fw_fn=fw_fn,
-             output_dir=output_dir, num_workers=20)
+        # Example with batch correction - add batch_key parameter if needed
+        # main(data_fn, tfs_fn, genes_fn, layer_key='counts', latent_obsm_key="spatial", 
+        #      n_neighbors=10, fw_fn=fw_fn, output_dir=output_dir, num_workers=20, batch_key='batch')
+        main(data_fn, tfs_fn, genes_fn, layer_key='counts', latent_obsm_key="spatial", 
+             n_neighbors=10, fw_fn=fw_fn, output_dir=output_dir, num_workers=20)
