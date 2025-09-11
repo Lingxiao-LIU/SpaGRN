@@ -21,6 +21,12 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 from typing import Optional
 import matplotlib as mpl
+from scipy.spatial.distance import jensenshannon
+from scipy.cluster.hierarchy import dendrogram, linkage, leaves_list
+from scipy.cluster import hierarchy
+import warnings
+warnings.filterwarnings('ignore')
+
 mpl.rcParams['pdf.fonttype'] = 42
 mpl.rcParams['ps.fonttype'] = 42
 mpl.rcParams['svg.fonttype'] = 'none'
@@ -431,109 +437,6 @@ def auc_heatmap(data: anndata.AnnData,
         plt.savefig(fn, format=file_format)
     return g
 
-
-def isr_heatmap(data: anndata.AnnData,
-                cluster_label: str,
-                isr_mtx=None,
-                rss_fn=None,
-                topn=5,
-                save=True,
-                subset=True,
-                subset_size=5000,
-                fn='clusters_heatmap_top5.pdf',
-                legend_fn="rss_celltype_legend.pdf",
-                cluster_list=None,
-                row_cluster=False,
-                col_cluster=True,
-                cmap="YlGnBu",
-                vmin=-3, vmax=3,
-                yticklabels=True, xticklabels=True,
-                **kwargs):
-    """
-    Plot heatmap for Regulon specificity scores (RSS) value
-    :param data:
-    :param cluster_label:
-    :param isr_mtx:
-    :param rss_fn:
-    :param topn:
-    :param save:
-    :param subset:
-    :param subset_size:
-    :param fn:
-    :param legend_fn:
-    :param cluster_list:
-    :param row_cluster:
-    :param col_cluster:
-    :param cmap:
-    :param vmin:
-    :param vmax:
-    :param yticklabels:
-    :param xticklabels:
-    :param kwargs:
-    :return:
-
-    Example:
-        # only plot ['CNS', 'amnioserosa', 'carcass'] clusters and their corresponding top regulons
-        auc_heatmap(adata, auc_mtx, cluster_label='celltypes', subset=False,
-                    rss_fn='regulon_specificity_scores.txt',
-                    cluster_list=['CNS', 'amnioserosa', 'carcass'])
-    """
-    if isr_mtx is None:
-        isr_mtx = data.obsm['isr']
-    if subset and len(data.obs) > subset_size:
-        fraction = subset_size / len(data.obs)
-        # do stratified sampling
-        draw_obs = data.obs.groupby(cluster_label, group_keys=False).apply(lambda x: x.sample(frac=fraction))
-        # load the regulon_list from a file using the load_signatures function
-        cell_order = draw_obs[cluster_label].sort_values()
-    else:
-        # load the regulon_list from a file using the load_signatures function
-        cell_order = data.obs[cluster_label].sort_values()
-    celltypes = sorted(list(set(data.obs[cluster_label])))
-
-    # Regulon specificity scores (RSS) across predicted cell types
-    if rss_fn is None:
-        rss_cellType = regulon_specificity_scores(isr_mtx, data.obs[cluster_label])
-    else:
-        rss_cellType = pd.read_csv(rss_fn, index_col=0)
-    # Select the top 5 regulon_list from each cell type
-    topreg = get_top_regulons(data, cluster_label, rss_cellType, topn=topn)
-
-    if cluster_list is None:
-        cluster_list = celltypes.copy()
-    colorsd = dict((i, c) for i, c in zip(cluster_list, COLORS))
-    colormap = [colorsd[x] for x in cell_order]
-
-    # plot legend
-    plot_legend(colorsd, fn=legend_fn)
-
-    # plot z-score
-    isr_zscore = cal_zscore(isr_mtx)
-    try:
-        plot_data = isr_zscore[topreg].loc[cell_order.index]
-    except KeyError:
-        com_topreg = list(set(topreg).intersection(set(isr_zscore.columns)))
-        plot_data = isr_zscore[com_topreg].loc[cell_order.index]
-    sns.set(font_scale=1.2)
-    g = sns.clustermap(plot_data,
-                       annot=False,
-                       square=False,
-                       linecolor='gray',
-                       yticklabels=yticklabels, xticklabels=xticklabels,
-                       vmin=vmin, vmax=vmax,
-                       cmap=cmap,
-                       row_colors=colormap,
-                       row_cluster=row_cluster,
-                       col_cluster=col_cluster,
-                       **kwargs)
-    g.cax.set_visible(False)
-    g.ax_heatmap.set_yticks([])
-    g.ax_heatmap.set_ylabel('')
-    g.ax_heatmap.set_xlabel('')
-    if save:
-        file_format = os.path.splitext(fn)[1].replace('.','')
-        plt.savefig(fn, format=file_format)
-    return g
 
 
 def auc_heatmap_uneven(data: anndata.AnnData,
@@ -1532,3 +1435,8 @@ def plot_isr(mtx,
     file_format = os.path.splitext(fn)[1].replace('.', '')
     plt.savefig(fn, format=file_format)
     plt.close()
+
+
+
+
+
