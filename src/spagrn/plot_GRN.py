@@ -536,7 +536,6 @@ if __name__ == "__main__":
         selected_tfs=['TF1', 'TF2'],
         color_scheme='earth',
         show_edge_labels=True,
-        save_path='grn_network.pdf'
     )
 
     # Show difference between all and filtered receptors
