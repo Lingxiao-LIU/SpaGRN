@@ -144,12 +144,14 @@ def isr_heatmap(adata,
                           cbar_kws={'label': 'ISR Score'})
         
         # Improve axis labels
-        g.ax_heatmap.set_xlabel('Regulons', fontsize=12)
-        g.ax_heatmap.set_ylabel('Cell Types', fontsize=12)
+        g.ax_heatmap.set_xlabel('Regulons', fontsize=18)
+        g.ax_heatmap.set_ylabel('Cell Types', fontsize=18)
         
-        # Rotate x-axis labels for better readability
+        # Rotate x-axis labels and increase tick size for better readability
         if xticklabels:
-            plt.setp(g.ax_heatmap.get_xticklabels(), rotation=45, ha='right')
+            g.ax_heatmap.set_xticklabels(g.ax_heatmap.get_xticklabels(), rotation=45, ha='right', fontsize=18)
+        if yticklabels:
+            g.ax_heatmap.set_yticklabels(g.ax_heatmap.get_yticklabels(), fontsize=18)
         
         plt.sca(g.ax_heatmap)
         
@@ -164,15 +166,15 @@ def isr_heatmap(adata,
                    yticklabels=yticklabels,
                    cbar_kws={'label': 'ISR Score'})
         
-        plt.xlabel('Regulons', fontsize=12)
-        plt.ylabel('Cell Types', fontsize=12)
+        plt.xlabel('Regulons', fontsize=18)
+        plt.ylabel('Cell Types', fontsize=18)
         
-        # Rotate x-axis labels for better readability
-        if xticklabels:
-            plt.xticks(rotation=45, ha='right')
+        # Rotate x-axis labels and increase tick size for better readability
+        plt.xticks(fontsize=18, rotation=45, ha='right')
+        plt.yticks(fontsize=18)
     
     plt.title(f'ISR Heatmap ({len(heatmap_data.columns)} regulons, {len(heatmap_data.index)} cell types)', 
-              fontsize=14, pad=20)
+              fontsize=18, pad=20)
     
     plt.tight_layout()
     
@@ -250,11 +252,11 @@ def create_individual_cell_heatmap(adata,
                       yticklabels=False,  # Too many cells to show labels
                       **kwargs)
     
-    g.ax_heatmap.set_ylabel('Individual Cells', fontsize=12)
-    g.ax_heatmap.set_xlabel('Regulons', fontsize=12)
+    g.ax_heatmap.set_ylabel('Individual Cells', fontsize=18)
+    g.ax_heatmap.set_xlabel('Regulons', fontsize=18)
     
     plt.title(f'Individual Cell ISR Heatmap ({len(sampled_cells)} cells, {len(plot_data.columns)} regulons)', 
-              fontsize=14, pad=20)
+              fontsize=18, pad=20)
     
     plt.tight_layout()
     plt.show()
@@ -401,10 +403,10 @@ def simple_isr_heatmap(adata, cluster_label='subleiden', figsize=(12, 6), min_va
                 cbar_kws={'label': 'Mean ISR Score', 'pad': 0.15})
     
     plt.title(f'ISR Heatmap: {len(filtered_data.index)} cell types × {len(filtered_data.columns)} regulons')
-    plt.xlabel('Regulons', fontsize=16)
-    plt.ylabel('Cell Types', fontsize=16)
-    plt.xticks(rotation=45, fontsize=16)  # Adjusted x-axis rotation and font size
-    plt.yticks(fontsize=16)  # Adjusted y-axis font size
+    plt.xlabel('Regulons', fontsize=18)
+    plt.ylabel('Cell Types', fontsize=18)
+    plt.xticks(rotation=45, fontsize=18)  # Adjusted x-axis rotation and font size
+    plt.yticks(fontsize=18)  # Adjusted y-axis font size
     plt.tight_layout()
     plt.show()
     
@@ -512,11 +514,11 @@ def plot_spatial_auc(
     # Add colorbar with increased padding and larger tick/label font size
     cbar = plt.colorbar(scatter, label=f'{transcription_factor} AUC', pad=0.1)
     cbar.ax.tick_params(labelsize=14)  # Colorbar tick font size
-    cbar.set_label(f'{transcription_factor} AUC', fontsize=16)  # Colorbar label font size
+    cbar.set_label(f'{transcription_factor} AUC', fontsize=18)  # Colorbar label font size
     
     # Set title and labels with larger title font size
     plt.title(title_prefix + (f' ({subset_column}: {sample})' if subset else ''), fontsize=20)
-    #plt.xlabel('X', fontsize=12)
+    #plt.xlabel('X', fontsize=18)
     #plt.ylabel('Y', fontsize=12)
     
     # Save plot
