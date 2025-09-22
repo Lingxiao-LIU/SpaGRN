@@ -7,6 +7,8 @@ import seaborn as sns
 from matplotlib.patches import Rectangle
 import warnings
 
+
+
 def plot_grn_network(
     adata,
     receptor_source: str = 'receptor_dict',
@@ -17,9 +19,10 @@ def plot_grn_network(
     layout_type: str = 'layered',
     node_size_scale: float = 1.0,
     edge_width_scale: float = 1.0,
+    edge_length_scale: float = 1.0,
     show_edge_labels: bool = False,
     color_scheme: str = 'default',
-    figsize: Tuple[int, int] = (7, 7),
+    figsize: Tuple[int, int] = (8, 7),
     save_path: Optional[str] = None,
     title: Optional[str] = None,
     show_legend: bool = True,
@@ -34,10 +37,7 @@ def plot_grn_network(
     adata : AnnData
         Annotated data object containing GRN analysis results
     receptor_source : str, default 'receptor_dict'
-        Key in adata.uns for receptor data. Options:
-        - 'receptor_dict_all': all receptors
-        - 'receptor_dict': filtered receptors  
-        - 'receptor_dict_diff': difference (receptor_dict_all - receptor_dict)
+        Key in adata.uns for receptor data. Only 'receptor_dict' is supported.
     min_importance : float, default 0.1
         Minimum edge importance threshold for TF-target connections
     max_nodes : int, optional
@@ -52,11 +52,13 @@ def plot_grn_network(
         Scaling factor for node sizes
     edge_width_scale : float, default 1.0
         Scaling factor for edge widths
+    edge_length_scale : float, default 1.0
+        Scaling factor for edge lengths/node spacing. Higher values increase spacing.
     show_edge_labels : bool, default False
         Whether to show importance values on edges
     color_scheme : str, default 'default'
         Color scheme: 'default', 'pastel', 'bright', 'earth'
-    figsize : tuple, default (15, 10)
+    figsize : tuple, default (8, 7)
         Figure size (width, height)
     save_path : str, optional
         Path to save the plot
@@ -64,7 +66,7 @@ def plot_grn_network(
         Plot title
     show_legend : bool, default True
         Whether to show legend
-    font_size : int, default 8
+    font_size : int, default 12
         Font size for labels
     dpi : int, default 300
         DPI for saved figure
@@ -81,42 +83,31 @@ def plot_grn_network(
     # Basic usage
     fig, G = plot_grn_network(adata)
     
-    # Use all receptors with custom filtering
+    # Custom edge spacing and filtering
     fig, G = plot_grn_network(
         adata, 
-        receptor_source='receptor_dict_all',
         min_importance=0.2,
-        max_nodes=50
+        max_nodes=50,
+        edge_length_scale=1.5
     )
     
-    # Focus on specific TFs
+    # Focus on specific TFs with increased spacing
     fig, G = plot_grn_network(
         adata,
         selected_tfs=['TF1', 'TF2'],
         layout_type='spring',
-        color_scheme='earth'
+        color_scheme='earth',
+        edge_length_scale=2.0
     )
     """
     
     # Validate inputs
-    if receptor_source not in ['receptor_dict', 'receptor_dict_all', 'receptor_dict_diff']:
-        raise ValueError("receptor_source must be 'receptor_dict', 'receptor_dict_all', or 'receptor_dict_diff'")
+    if receptor_source != 'receptor_dict':
+        raise ValueError("receptor_source must be 'receptor_dict'. receptor_dict_all is not supported.")
     
     # Extract data from adata
     try:
-        if receptor_source == 'receptor_dict_diff':
-            receptor_dict_all = adata.uns.get('receptor_dict_all', {})
-            receptor_dict = adata.uns.get('receptor_dict', {})
-            # Calculate difference
-            receptor_data = {}
-            for tf, receptors_all in receptor_dict_all.items():
-                receptors_filtered = receptor_dict.get(tf, [])
-                diff_receptors = list(set(receptors_all) - set(receptors_filtered))
-                if diff_receptors:
-                    receptor_data[tf] = diff_receptors
-        else:
-            receptor_data = adata.uns.get(receptor_source, {})
-            
+        receptor_data = adata.uns.get(receptor_source, {})
         regulon_dict = adata.uns.get('regulon_dict', {})
         adj_data = adata.uns.get('adj', [])
         
@@ -245,17 +236,46 @@ def plot_grn_network(
     
     colors = color_schemes[color_scheme]
     
-    # Calculate layout
+    # Calculate layout with edge length scaling
     if layout_type == 'layered':
-        pos = _calculate_layered_layout(G, receptor_nodes, tf_nodes, target_nodes)
+        pos = _calculate_layered_layout(G, receptor_nodes, tf_nodes, target_nodes, edge_length_scale)
+        # Fallback to spring layout if layered layout fails or returns empty positions
+        if not pos or len(pos) == 0:
+            print("Warning: Layered layout failed, falling back to spring layout")
+            pos = nx.spring_layout(G, k=1/(max(len(G.nodes())**0.5, 1)) * edge_length_scale, iterations=50)
     elif layout_type == 'spring':
-        pos = nx.spring_layout(G, k=3, iterations=50)
+        pos = nx.spring_layout(G, k=1/(max(len(G.nodes())**0.5, 1)) * edge_length_scale, iterations=50)
     elif layout_type == 'circular':
         pos = nx.circular_layout(G)
+        # Apply scaling manually for circular layout
+        pos = {node: (x * edge_length_scale, y * edge_length_scale) for node, (x, y) in pos.items()}
     elif layout_type == 'hierarchical':
-        pos = nx.shell_layout(G, nlist=[receptor_nodes, tf_nodes, target_nodes])
+        # Ensure we have non-empty node lists
+        receptor_list = list(receptor_nodes) if receptor_nodes else []
+        tf_list = list(tf_nodes) if tf_nodes else []
+        target_list = list(target_nodes) if target_nodes else []
+        node_lists = [lst for lst in [receptor_list, tf_list, target_list] if lst]
+        
+        if node_lists:
+            pos = nx.shell_layout(G, nlist=node_lists)
+            # Apply scaling manually for hierarchical layout
+            pos = {node: (x * edge_length_scale, y * edge_length_scale) for node, (x, y) in pos.items()}
+        else:
+            pos = nx.spring_layout(G, k=1/(max(len(G.nodes())**0.5, 1)) * edge_length_scale, iterations=50)
     else:
-        pos = nx.spring_layout(G)
+        pos = nx.spring_layout(G, k=1/(max(len(G.nodes())**0.5, 1)) * edge_length_scale, iterations=50)
+    
+    # Debug information
+    print(f"Layout type: {layout_type}")
+    print(f"Edge length scale: {edge_length_scale}")
+    print(f"Number of nodes positioned: {len(pos)}")
+    print(f"Receptor nodes: {len(receptor_nodes)}")
+    print(f"TF nodes: {len(tf_nodes)}")
+    print(f"Target nodes: {len(target_nodes)}")
+    if pos:
+        x_coords = [x for x, y in pos.values()]
+        y_coords = [y for x, y in pos.values()]
+        print(f"Position range - X: [{min(x_coords):.2f}, {max(x_coords):.2f}], Y: [{min(y_coords):.2f}, {max(y_coords):.2f}]")
     
     # Create figure
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
@@ -307,7 +327,8 @@ def plot_grn_network(
             )
     
     # Draw labels
-    label_pos = {node: (x, y+0.05) for node, (x, y) in pos.items()}
+    label_offset = 0.05 * edge_length_scale
+    label_pos = {node: (x, y + label_offset) for node, (x, y) in pos.items()}
     nx.draw_networkx_labels(G, label_pos, font_size=font_size, ax=ax)
     
     # Draw edge labels if requested
@@ -329,16 +350,16 @@ def plot_grn_network(
             plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=colors['target'], 
                       markersize=8, label=f'Targets (n={len(target_nodes)})'),
             plt.Line2D([0], [0], color=colors['receptor_tf_edge'], linewidth=2, 
-                      label='Receptor→TF'),
+                      label='Receptor -> TF'),
             plt.Line2D([0], [0], color=colors['tf_target_edge'], linewidth=2, 
-                      label='TF→Target')
+                      label='TF -> Target')
         ]
         ax.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.3, 1.2))
     
     # Set title
     if title is None:
         title = f'Gene Regulatory Network ({receptor_source.replace("_", " ").title()})'
-    ax.set_title(title, fontsize=14, fontweight='bold')
+    ax.set_title(title, fontsize=18, fontweight='bold')
     
     # Add network statistics as text
     stats_text = f"Nodes: {len(G.nodes())} | Edges: {len(G.edges())}\n"
@@ -358,41 +379,63 @@ def plot_grn_network(
     return fig, G
 
 
-def _calculate_layered_layout(G, receptor_nodes, tf_nodes, target_nodes):
-    """Calculate layered layout positions for GRN visualization."""
+def _calculate_layered_layout(G, receptor_nodes, tf_nodes, target_nodes, edge_length_scale=1.0):
+    """Calculate layered layout positions for GRN visualization with adjustable spacing."""
     pos = {}
     
-    # Layer positions
+    # Convert to lists and ensure they're not empty
+    receptor_list = list(receptor_nodes) if receptor_nodes else []
+    tf_list = list(tf_nodes) if tf_nodes else []
+    target_list = list(target_nodes) if target_nodes else []
+    
+    print(f"Layered layout - Receptors: {len(receptor_list)}, TFs: {len(tf_list)}, Targets: {len(target_list)}")
+    
+    # Layer positions with scaling - make scaling more dramatic
+    layer_spacing = 3.0 * edge_length_scale  # Increased base spacing even more
     layers = {
-        'receptor': {'x': 0, 'y_center': 0},
-        'tf': {'x': 1, 'y_center': 0}, 
-        'target': {'x': 2, 'y_center': 0}
+        'receptor': {'x': -layer_spacing, 'y_center': 0},
+        'tf': {'x': 0, 'y_center': 0}, 
+        'target': {'x': layer_spacing, 'y_center': 0}
     }
     
     # Position receptors
-    receptor_list = list(receptor_nodes)
     if receptor_list:
-        y_spacing = 1.0 if len(receptor_list) <= 1 else 2.0 / (len(receptor_list) - 1)
-        for i, receptor in enumerate(receptor_list):
-            y = -1.0 + i * y_spacing if len(receptor_list) > 1 else 0
-            pos[receptor] = (layers['receptor']['x'], y)
+        base_spacing = 2.0 * edge_length_scale  # Increased base vertical spacing
+        if len(receptor_list) == 1:
+            pos[receptor_list[0]] = (layers['receptor']['x'], 0)
+        else:
+            y_range = 4.0 * edge_length_scale
+            y_spacing = y_range / (len(receptor_list) - 1)
+            start_y = -y_range / 2
+            for i, receptor in enumerate(receptor_list):
+                y = start_y + i * y_spacing
+                pos[receptor] = (layers['receptor']['x'], y)
     
     # Position TFs
-    tf_list = list(tf_nodes)
     if tf_list:
-        y_spacing = 1.0 if len(tf_list) <= 1 else 2.0 / (len(tf_list) - 1)
-        for i, tf in enumerate(tf_list):
-            y = -1.0 + i * y_spacing if len(tf_list) > 1 else 0
-            pos[tf] = (layers['tf']['x'], y)
+        if len(tf_list) == 1:
+            pos[tf_list[0]] = (layers['tf']['x'], 0)
+        else:
+            y_range = 4.0 * edge_length_scale
+            y_spacing = y_range / (len(tf_list) - 1)
+            start_y = -y_range / 2
+            for i, tf in enumerate(tf_list):
+                y = start_y + i * y_spacing
+                pos[tf] = (layers['tf']['x'], y)
     
     # Position targets
-    target_list = list(target_nodes)
     if target_list:
-        y_spacing = 0.8 if len(target_list) <= 1 else 1.6 / (len(target_list) - 1)
-        for i, target in enumerate(target_list):
-            y = -0.8 + i * y_spacing if len(target_list) > 1 else 0
-            pos[target] = (layers['target']['x'], y)
+        if len(target_list) == 1:
+            pos[target_list[0]] = (layers['target']['x'], 0)
+        else:
+            y_range = 5.0 * edge_length_scale  # Slightly larger range for targets
+            y_spacing = y_range / (len(target_list) - 1)
+            start_y = -y_range / 2
+            for i, target in enumerate(target_list):
+                y = start_y + i * y_spacing
+                pos[target] = (layers['target']['x'], y)
     
+    print(f"Generated {len(pos)} positions")
     return pos
 
 
@@ -413,18 +456,7 @@ def get_network_summary(adata, receptor_source: str = 'receptor_dict') -> Dict:
         Dictionary containing network statistics
     """
     try:
-        if receptor_source == 'receptor_dict_diff':
-            receptor_dict_all = adata.uns.get('receptor_dict_all', {})
-            receptor_dict = adata.uns.get('receptor_dict', {})
-            receptor_data = {}
-            for tf, receptors_all in receptor_dict_all.items():
-                receptors_filtered = receptor_dict.get(tf, [])
-                diff_receptors = list(set(receptors_all) - set(receptors_filtered))
-                if diff_receptors:
-                    receptor_data[tf] = diff_receptors
-        else:
-            receptor_data = adata.uns.get(receptor_source, {})
-            
+        receptor_data = adata.uns.get(receptor_source, {})
         regulon_dict = adata.uns.get('regulon_dict', {})
         adj_data = adata.uns.get('adj', [])
         
@@ -470,15 +502,10 @@ def test_grn_plot():
     
     # Create sample AnnData object
     sample_data = {
-        'receptor_dict_all': {
-            'TF1': ['EGFR', 'PDGFRA', 'FGFR1'],
-            'TF2': ['VEGFR2', 'NOTCH1', 'WNT3A'],
-            'TF3': ['TGFβR1', 'BMPR1A']
-        },
         'receptor_dict': {
             'TF1': ['EGFR', 'PDGFRA'],
             'TF2': ['VEGFR2', 'NOTCH1'],
-            'TF3': ['TGFβR1']
+            'TF3': ['TGFÎ²R1']
         },
         'regulon_dict': {
             'TF1(+)': ['Gene1', 'Gene2', 'Gene3', 'Gene4'],
@@ -504,43 +531,49 @@ def test_grn_plot():
     adata = ad.AnnData(np.random.rand(100, 20))
     adata.uns.update(sample_data)
     
-    # Test different receptor sources
-    for source in ['receptor_dict', 'receptor_dict_all', 'receptor_dict_diff']:
-        print(f"\nTesting with receptor_source='{source}'")
-        fig, G = plot_grn_network(adata, receptor_source=source, title=f"GRN Network ({source})")
-        if fig:
-            plt.show()
+    # Test basic usage
+    print("Testing basic usage...")
+    fig, G = plot_grn_network(adata, title="Basic GRN Network")
+    if fig:
+        plt.show()
+    
+    # Test with increased edge spacing
+    print("\nTesting with increased edge spacing...")
+    fig, G = plot_grn_network(
+        adata, 
+        edge_length_scale=2.0,
+        title="GRN Network - Increased Spacing"
+    )
+    if fig:
+        plt.show()
         
-        # Print summary
-        summary = get_network_summary(adata, source)
-        print("Network Summary:", summary)
+    # Print summary
+    summary = get_network_summary(adata, 'receptor_dict')
+    print("Network Summary:", summary)
+
 
 if __name__ == "__main__":
     test_grn_plot()
     
+    # Example usage (only runs when script is executed directly):
+    # Note: These examples require an actual adata object
     
     # Basic usage
-    fig, G = plot_grn_network(adata)
+    # fig, G = plot_grn_network(adata)
 
-    # Use all receptors with filtering
-    fig, G = plot_grn_network(
-        adata, 
-        receptor_source='receptor_dict_all',
-        min_importance=0.2,
-        max_nodes=50
-    )
+    # Custom edge spacing and filtering
+    # fig, G = plot_grn_network(
+    #     adata, 
+    #     min_importance=0.2,
+    #     max_nodes=50,
+    #     edge_length_scale=1.5
+    # )
 
-    # Focus on specific TFs with earth styling
-    fig, G = plot_grn_network(
-        adata,
-        selected_tfs=['TF1', 'TF2'],
-        color_scheme='earth',
-        show_edge_labels=True,
-    )
-
-    # Show difference between all and filtered receptors
-    fig, G = plot_grn_network(
-        adata,
-        receptor_source='receptor_dict_diff',
-        title='Filtered Out Receptors'
-    )
+    # Focus on specific TFs with earth styling and increased spacing
+    # fig, G = plot_grn_network(
+    #     adata,
+    #     selected_tfs=['TF1', 'TF2'],
+    #     color_scheme='earth',
+    #     show_edge_labels=True,
+    #     edge_length_scale=2.0
+    # )
