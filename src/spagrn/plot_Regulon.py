@@ -14,12 +14,14 @@ from scipy.cluster import hierarchy
 import warnings
 warnings.filterwarnings('ignore')
 
+
 def isr_heatmap(adata, 
                 cluster_label='subleiden', 
                 isr_mtx=None,
                 rss_df=None,
                 topn=None,  # If None, show all regulons unless selected_regulons is specified
                 selected_regulons=None,  # New parameter for specific regulons
+                excluded_cell_types=None,  # New parameter to exclude cell types
                 save=False,
                 filename='isr_heatmap.pdf',
                 figsize=(12, 8),
@@ -48,6 +50,8 @@ def isr_heatmap(adata,
         Number of top regulons per cell type to show. If None, shows all unless selected_regulons is specified
     selected_regulons : list or None
         List of specific regulon names to show. If not None, overrides topn and shows only these regulons
+    excluded_cell_types : list or None
+        List of cell type names to exclude from the plot. If None, includes all cell types.
     save : bool
         Whether to save the figure
     filename : str
@@ -103,6 +107,14 @@ def isr_heatmap(adata,
     
     # Get cell type annotations
     cell_types = adata.obs[cluster_label]
+    
+    # Exclude cell types if specified
+    if excluded_cell_types is not None:
+        mask = ~cell_types.isin(excluded_cell_types)
+        cell_types = cell_types[mask]
+        isr_mtx = isr_mtx.loc[mask]
+        print(f"Excluded cell types: {excluded_cell_types}")
+        print(f"Remaining cell types: {sorted(cell_types.unique())}")
     
     # Create mean ISR per cell type for better visualization
     cell_type_means = []
@@ -195,6 +207,7 @@ def isr_heatmap(adata,
     print(f"  - Data range: {heatmap_data.values.min():.3f} to {heatmap_data.values.max():.3f}")
     
     return heatmap_data
+
 
 def create_individual_cell_heatmap(adata,
                                   cluster_label='subleiden',
@@ -504,7 +517,11 @@ heatmap_data = isr_heatmap(
     cluster_label='niche3',
     isr_mtx=PDAC.obsm['isr'],
     rss_df=PDAC.uns['rss'],
-    selected_regulons=['IRF3', 'IRF4'],  # Only show IRF3 and IRF4
+    selected_regulons=['ETS1(+)', 'FOS(+)', 'FOXP3(+)', 'GATA3(+)', 'IRF3(+)', 'IRF4(+)', 
+                       'JUN(+)', 'JUNB(+)', 'MAF(+)', 'NFKB1(+)', 'NR3C1(+)', 'PPARA(+)', 
+                       'PPARG(+)', 'RELA(+)', 'RUNX3(+)', 'SMAD2(+)', 'SMAD3(+)', 
+                       'STAT1(+)', 'STAT4(+)', 'STAT6(+)', 'TFEB(+)', 'TP53(+)'],  # Only show IRF3 and IRF4
+    excluded_cell_types=['Plasma cell'],
     figsize=(20, 7),
     cmap="YlGnBu",
     xticklabels=True,
