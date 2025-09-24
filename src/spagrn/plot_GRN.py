@@ -202,6 +202,11 @@ def plot_grn_network(
         tf_nodes = tf_nodes.intersection(keep_nodes)
         target_nodes = target_nodes.intersection(keep_nodes)
     
+    # Print the nodes plotted
+    print("Receptors plotted:", sorted(list(receptor_nodes)))
+    print("TFs plotted:", sorted(list(tf_nodes)))
+    print("Target genes plotted:", sorted(list(target_nodes)))
+    
     # Define color schemes
     color_schemes = {
         'default': {
