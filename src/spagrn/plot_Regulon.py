@@ -1,8 +1,6 @@
 # python core modules
 import os
-
-# third party modules
-import anndata
+import uuid
 import pandas as pd
 import numpy as np
 import scanpy as sc
@@ -16,23 +14,23 @@ from scipy.cluster import hierarchy
 import warnings
 warnings.filterwarnings('ignore')
 
-
 def isr_heatmap(adata, 
-                     cluster_label='subleiden', 
-                     isr_mtx=None,
-                     rss_df=None,
-                     topn=None,  # If None, show all regulons
-                     save=False,
-                     filename='isr_heatmap.pdf',
-                     figsize=(12, 8),
-                     row_cluster=True,
-                     col_cluster=True,
-                     cmap="YlGnBu",
-                     vmin=None,
-                     vmax=None,
-                     yticklabels=True,
-                     xticklabels=True,
-                     show_cell_type_colors=True):
+                cluster_label='subleiden', 
+                isr_mtx=None,
+                rss_df=None,
+                topn=None,  # If None, show all regulons unless selected_regulons is specified
+                selected_regulons=None,  # New parameter for specific regulons
+                save=False,
+                filename='isr_heatmap.pdf',
+                figsize=(12, 8),
+                row_cluster=True,
+                col_cluster=True,
+                cmap="YlGnBu",
+                vmin=None,
+                vmax=None,
+                yticklabels=True,
+                xticklabels=True,
+                show_cell_type_colors=True):
     """
     Create a comprehensive ISR (regulon activity) heatmap with proper cell type annotations
     
@@ -47,7 +45,9 @@ def isr_heatmap(adata,
     rss_df : pd.DataFrame or None
         RSS scores (cell_types x regulons). If None, will use adata.uns['rss']
     topn : int or None
-        Number of top regulons per cell type to show. If None, shows all
+        Number of top regulons per cell type to show. If None, shows all unless selected_regulons is specified
+    selected_regulons : list or None
+        List of specific regulon names to show. If not None, overrides topn and shows only these regulons
     save : bool
         Whether to save the figure
     filename : str
@@ -77,9 +77,14 @@ def isr_heatmap(adata,
         else:
             raise ValueError("ISR matrix not found. Please provide isr_mtx parameter or ensure adata.obsm['isr'] exists")
     
-    # Get RSS scores if available and topn is specified
-    selected_regulons = None
-    if topn is not None and rss_df is not None:
+    # Filter by selected regulons if specified
+    if selected_regulons is not None:
+        available_regulons = set(isr_mtx.columns).intersection(selected_regulons)
+        if not available_regulons:
+            raise ValueError(f"None of the selected regulons {selected_regulons} found in ISR matrix columns: {list(isr_mtx.columns)}")
+        isr_mtx = isr_mtx[list(available_regulons)]
+    # Otherwise, get RSS scores if available and topn is specified
+    elif topn is not None and rss_df is not None:
         # Get top N regulons per cell type
         top_regulons = set()
         cell_types = adata.obs[cluster_label].unique()
@@ -92,8 +97,7 @@ def isr_heatmap(adata,
         # Filter ISR matrix to only include top regulons
         available_regulons = set(isr_mtx.columns).intersection(top_regulons)
         if available_regulons:
-            selected_regulons = list(available_regulons)
-            isr_mtx = isr_mtx[selected_regulons]
+            isr_mtx = isr_mtx[list(available_regulons)]
         else:
             print(f"Warning: No overlap between top regulons and ISR matrix columns. Using all regulons.")
     
@@ -187,7 +191,7 @@ def isr_heatmap(adata,
     # Print summary information
     print(f"Heatmap created with:")
     print(f"  - {len(heatmap_data.index)} cell types: {', '.join(heatmap_data.index)}")
-    print(f"  - {len(heatmap_data.columns)} regulons")
+    print(f"  - {len(heatmap_data.columns)} regulons: {', '.join(heatmap_data.columns)}")
     print(f"  - Data range: {heatmap_data.values.min():.3f} to {heatmap_data.values.max():.3f}")
     
     return heatmap_data
@@ -263,33 +267,6 @@ def create_individual_cell_heatmap(adata,
     
     return plot_data
 
-# Example usage with your data:
-"""
-# For averaged cell type heatmap (recommended for interpretation)
-heatmap_data = isr_heatmap(
-    PDAC_subset,
-    cluster_label='subleiden',
-    isr_mtx=pd.DataFrame(PDAC_subset.obsm['isr'], 
-                        index=PDAC_subset.obs_names,
-                        columns=[f'Regulon_{i}' for i in range(PDAC_subset.obsm['isr'].shape[1])]),
-    rss_df=PDAC_subset.uns['rss'] if 'rss' in PDAC_subset.uns else None,
-    topn=10,  # Show top 10 regulons per cell type, or None for all
-    figsize=(15, 8),
-    cmap="YlGnBu",
-    xticklabels=True,
-    yticklabels=True
-)
-
-# For individual cell heatmap (if you want to see cell-level variation)
-individual_data = create_individual_cell_heatmap(
-    PDAC_subset,
-    cluster_label='subleiden',
-    max_cells_per_type=30, # Limit to 30 cells per type for visualization
-    figsize=(20, 12),
-    cmap="YlGnBu"
-)
-"""
-
 def debug_isr_data(adata, cluster_label='subleiden'):
     """
     Debug function to understand your ISR data structure
@@ -341,7 +318,6 @@ def debug_isr_data(adata, cluster_label='subleiden'):
     
     return True
 
-# Simple function to create a basic heatmap without clustering
 def simple_isr_heatmap(adata, cluster_label='subleiden', figsize=(12, 6), min_variance=0.001, **kwargs):
     """
     Create a simple heatmap without clustering (more robust)
@@ -411,8 +387,6 @@ def simple_isr_heatmap(adata, cluster_label='subleiden', figsize=(12, 6), min_va
     plt.show()
     
     return filtered_data
-
-
 
 def plot_spatial_auc(
     adata,
@@ -518,12 +492,24 @@ def plot_spatial_auc(
     
     # Set title and labels with larger title font size
     plt.title(title_prefix + (f' ({subset_column}: {sample})' if subset else ''), fontsize=20)
-    #plt.xlabel('X', fontsize=18)
-    #plt.ylabel('Y', fontsize=12)
     
     # Save plot
     plt.show()
 
 # Example usage:
-# plot_spatial_auc(PDAC_subset, PDAC_subset.obsm['auc_mtx'], 'JUN(+)', dot_size=50, figure_size=(8, 6))
-# plot_spatial_auc(PDAC_subset, PDAC_subset.obsm['rep_auc_mtx'], 'SOX9', subset=True, subset_column='patient', sample='W_C4')
+"""
+# For averaged cell type heatmap with selected regulons
+heatmap_data = isr_heatmap(
+    PDAC,
+    cluster_label='niche3',
+    isr_mtx=PDAC.obsm['isr'],
+    rss_df=PDAC.uns['rss'],
+    selected_regulons=['IRF3', 'IRF4'],  # Only show IRF3 and IRF4
+    figsize=(20, 7),
+    cmap="YlGnBu",
+    xticklabels=True,
+    yticklabels=True,
+    row_cluster=True,
+    col_cluster=True
+)
+"""
