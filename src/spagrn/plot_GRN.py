@@ -377,7 +377,7 @@ def plot_grn_network(
     receptor_list = list(receptor_nodes)
     tf_list = list(tf_nodes)
     target_list = list(target_nodes)
-    print(f"Receptor: {receptor_list}. TF: {tf_list}, Target: {target_list}")
+    print(f"Receptor: {receptor_list}. \nTF: {tf_list}, \nTarget: {target_list}")
 
     return fig, G
 
