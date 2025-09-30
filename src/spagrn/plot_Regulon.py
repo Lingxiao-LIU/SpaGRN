@@ -32,7 +32,7 @@ def isr_heatmap(adata,
                 vmax=None,
                 yticklabels=True,
                 xticklabels=True,
-                show_cell_type_colors=True):
+                show_cell_type_colors=False):  # Changed default to False
     """
     Create a comprehensive ISR (regulon activity) heatmap with proper cell type annotations
     
@@ -136,17 +136,7 @@ def isr_heatmap(adata,
     
     # Create clustermap if clustering is requested
     if row_cluster or col_cluster:
-        # Prepare row colors for cell types if requested
-        row_colors = None
-        if show_cell_type_colors:
-            # Create color palette for cell types
-            n_clusters = len(cell_type_names)
-            colors = plt.cm.tab20(np.linspace(0, 1, n_clusters))
-            cluster_colors = dict(zip(cell_type_names, colors))
-            row_colors = pd.Series([cluster_colors[ct] for ct in cell_type_names], 
-                                 index=cell_type_names, name='Cell Type')
-        
-        # Create clustermap
+        # Create clustermap without row colors
         g = sns.clustermap(heatmap_data,
                           row_cluster=row_cluster,
                           col_cluster=col_cluster,
@@ -155,9 +145,14 @@ def isr_heatmap(adata,
                           vmax=vmax,
                           xticklabels=xticklabels,
                           yticklabels=yticklabels,
-                          row_colors=row_colors if show_cell_type_colors else None,
+                          row_colors=None,  # Removed cell type colors
                           figsize=figsize,
-                          cbar_kws={'label': 'ISR Score'})
+                          dendrogram_ratio=(0.05, 0.1),  # Decreased dendrogram size (default is 0.2)
+                          cbar_pos=(0.02, 0.8, 0.01, 0.01))  # (left, bottom, width, height) - narrow colorbar
+        
+        # Add colorbar label
+        g.ax_cbar.set_ylabel('ISR Score', fontsize=14, rotation=90, labelpad=15)
+        g.ax_cbar.tick_params(labelsize=14)  # Increase colorbar tick label size
         
         # Improve axis labels
         g.ax_heatmap.set_xlabel('Regulons', fontsize=18)
@@ -168,6 +163,10 @@ def isr_heatmap(adata,
             g.ax_heatmap.set_xticklabels(g.ax_heatmap.get_xticklabels(), rotation=45, ha='right', fontsize=18)
         if yticklabels:
             g.ax_heatmap.set_yticklabels(g.ax_heatmap.get_yticklabels(), fontsize=18)
+        
+        # Move title above the top dendrogram
+        title_text = f'ISR Heatmap ({len(heatmap_data.columns)} regulons, {len(heatmap_data.index)} cell types)'
+        g.fig.suptitle(title_text, fontsize=18, y=0.98)  # Position above dendrogram
         
         plt.sca(g.ax_heatmap)
         
@@ -180,7 +179,7 @@ def isr_heatmap(adata,
                    vmax=vmax,
                    xticklabels=xticklabels,
                    yticklabels=yticklabels,
-                   cbar_kws={'label': 'ISR Score'})
+                   cbar_kws={'label': 'ISR Score', 'fraction': 0.02, 'aspect': 30})  # Narrow colorbar width
         
         plt.xlabel('Regulons', fontsize=18)
         plt.ylabel('Cell Types', fontsize=18)
@@ -188,9 +187,9 @@ def isr_heatmap(adata,
         # Rotate x-axis labels and increase tick size for better readability
         plt.xticks(fontsize=18, rotation=45, ha='right')
         plt.yticks(fontsize=18)
-    
-    plt.title(f'ISR Heatmap ({len(heatmap_data.columns)} regulons, {len(heatmap_data.index)} cell types)', 
-              fontsize=18, pad=20)
+        
+        plt.title(f'ISR Heatmap ({len(heatmap_data.columns)} regulons, {len(heatmap_data.index)} cell types)', 
+                  fontsize=18, pad=20)
     
     plt.tight_layout()
     
@@ -520,7 +519,7 @@ heatmap_data = isr_heatmap(
     selected_regulons=['ETS1(+)', 'FOS(+)', 'FOXP3(+)', 'GATA3(+)', 'IRF3(+)', 'IRF4(+)', 
                        'JUN(+)', 'JUNB(+)', 'MAF(+)', 'NFKB1(+)', 'NR3C1(+)', 'PPARA(+)', 
                        'PPARG(+)', 'RELA(+)', 'RUNX3(+)', 'SMAD2(+)', 'SMAD3(+)', 
-                       'STAT1(+)', 'STAT4(+)', 'STAT6(+)', 'TFEB(+)', 'TP53(+)'],  # Only show IRF3 and IRF4
+                       'STAT1(+)', 'STAT4(+)', 'STAT6(+)', 'TFEB(+)', 'TP53(+)'],  
     excluded_cell_types=['Plasma cell'],
     figsize=(20, 7),
     cmap="YlGnBu",
