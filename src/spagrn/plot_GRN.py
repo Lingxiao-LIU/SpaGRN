@@ -15,6 +15,7 @@ import warnings
 
 
 
+
 def plot_grn_network(
     adata,
     receptor_source: str = 'receptor_dict',
@@ -34,7 +35,19 @@ def plot_grn_network(
     title: Optional[str] = None,
     show_legend: bool = True,
     font_size: int = 12,
-    dpi: int = 300
+    dpi: int = 300,
+    filter_receptor: bool = False,
+    correlation_matrix: Optional[pd.DataFrame] = None,
+    correlation_z: Optional[pd.DataFrame] = None,
+    top_percent: Optional[float] = None,
+    min_correlation_threshold: float = 0.05,
+    min_z_threshold: float = 5.5,
+    top_n: Optional[int] = None,
+    correlation_method: str = 'mean',
+    show_heatmap: bool = False,
+    show_score_dist: bool = False,
+    heatmap_figsize: Tuple[int, int] = (12, 8),      
+    score_dist_figsize: Tuple[int, int] = (10, 6),   
 ) -> Tuple[plt.Figure, nx.DiGraph]:
     """
     Create a Gene Regulatory Network plot showing receptors -> TFs -> target genes.
@@ -80,6 +93,30 @@ def plot_grn_network(
         Font size for labels (not adjusted per user request)
     dpi : int, default 300
         DPI for saved figure
+    filter_receptor : bool, default False
+        Whether to filter receptors using spatial correlation
+    correlation_matrix : pd.DataFrame, optional
+        Precomputed spatial correlation matrix (required if filter_receptor=True)
+    correlation_z : pd.DataFrame, optional
+        Precomputed spatial correlation z-scores (required if filter_receptor=True)
+    top_percent : float, optional
+        Percentage of top correlated receptors to keep
+    min_correlation_threshold : float, default 0.05
+        Minimum correlation threshold
+    min_z_threshold : float, default 5.5
+        Minimum z-score threshold
+    top_n : int, optional
+        Select top N receptors, overriding other filters
+    correlation_method : str, default 'mean'
+        Method to aggregate correlations ('mean', 'median', 'max')
+    show_heatmap : bool, default False
+        Whether to show receptor-target correlation heatmap
+    show_score_dist : bool, default False
+        Whether to show receptor score distribution plot
+    heatmap_figsize : tuple, default (12, 8)
+        Figure size for correlation heatmap (width, height)
+    score_dist_figsize : tuple, default (10, 6)
+        Figure size for score distribution plot (width, height)
 
     Returns
     -------
@@ -92,6 +129,12 @@ def plot_grn_network(
     # Validate inputs
     if receptor_source != 'receptor_dict':
         raise ValueError("receptor_source must be 'receptor_dict'. receptor_dict_all is not supported.")
+
+    if filter_receptor:
+        if correlation_matrix is None or correlation_z is None:
+            raise ValueError("correlation_matrix and correlation_z are required when filter_receptor=True")
+        if not show_receptor:
+            warnings.warn("filter_receptor=True but show_receptor=False; filtering may not affect the plot")
 
     # Extract data from adata
     try:
@@ -124,14 +167,55 @@ def plot_grn_network(
             receptor_data = {tf: receptors for tf, receptors in receptor_data.items() if tf in selected_tfs}
         regulon_dict = {tf: targets for tf, targets in regulon_dict.items()
                        if tf.replace('(+)', '') in selected_tfs}
+    else:
+        selected_tfs = list(receptor_data.keys())
 
     # Filter adjacency data by importance and selected TFs
     filtered_adj = []
     for edge in adj_data:
         if edge.get('importance', 0) >= min_importance:
             tf_name = edge.get('TF', '')
-            if not selected_tfs or tf_name in selected_tfs:
+            if tf_name in selected_tfs:
                 filtered_adj.append(edge)
+
+    # Collect targets per TF based on filtered_adj
+    tf_to_targets = {}
+    for edge in filtered_adj:
+        tf = edge['TF']
+        if tf not in tf_to_targets:
+            tf_to_targets[tf] = []
+        tf_to_targets[tf].append(edge['target'])
+
+    # Filter receptors if requested
+    filtered_receptor_data = {}
+    filtering_results = {}
+    if filter_receptor and show_receptor:
+        top_percent_val = top_percent if top_percent is not None else 0.05
+        for tf in selected_tfs:
+            if tf not in receptor_data:
+                continue
+            target_genes = tf_to_targets.get(tf, None)
+            results = filter_receptors_by_correlation(
+                adata=adata,
+                tf_name=tf,
+                correlation_matrix=correlation_matrix,
+                correlation_z=correlation_z,
+                receptor_source=receptor_source,
+                candidate_receptors=selected_receptors,
+                target_genes=target_genes,
+                top_percent=top_percent_val,
+                min_correlation_threshold=min_correlation_threshold,
+                min_z_threshold=min_z_threshold,
+                top_n=top_n,
+                correlation_method=correlation_method,
+                save_results=False
+            )
+            filtering_results[tf] = results
+            filtered_receptor_data[tf] = results['filtered_receptors']
+
+        if filtered_receptor_data:
+            adata.uns['receptor_dict_filtered'] = filtered_receptor_data
+            receptor_data = filtered_receptor_data
 
     # Build network graph
     G = nx.DiGraph()
@@ -372,6 +456,26 @@ def plot_grn_network(
     if save_path:
         plt.savefig(save_path, dpi=dpi, bbox_inches='tight', facecolor='white')
         print(f"Plot saved to: {save_path}")
+
+    plt.show()
+
+    if filter_receptor:
+        for tf, results in filtering_results.items():
+            if show_heatmap:
+                plot_receptor_correlation_heatmap(
+                    correlation_matrix=correlation_matrix,
+                    filtering_results=results,
+                    show_all_receptors=False,
+                    figsize=heatmap_figsize,  # CHANGE THIS LINE
+                    save_path=None
+                )
+
+            if show_score_dist:
+                plot_receptor_score_distribution(
+                    filtering_results=results,
+                    figsize=score_dist_figsize,  # CHANGE THIS LINE
+                    save_path=None
+                )
 
     # Print categorized nodes
     receptor_list = list(receptor_nodes)
@@ -702,17 +806,21 @@ def compute_global_spatial_correlation_matrix(
     return correlation_matrix, correlation_z
 
 
+
 def filter_receptors_by_correlation(
     adata,
     tf_name: str,
     correlation_matrix: pd.DataFrame,
+    correlation_z: pd.DataFrame,
     receptor_source: str = 'receptor_dict',
     candidate_receptors: Optional[List[str]] = None,
     target_genes: Optional[List[str]] = None,
     top_percent: float = 0.05,
     min_correlation_threshold: float = 0.0,
+    min_z_threshold: float = 0.0,
+    top_n: Optional[int] = None,
     correlation_method: str = 'mean',  # 'mean', 'median', 'max'
-    save_results: bool = True,
+    save_results: bool = False,
     output_prefix: str = 'receptor_filtering'
 ) -> Dict:
     """
@@ -727,6 +835,8 @@ def filter_receptors_by_correlation(
         Name of the transcription factor (e.g., 'IRF4')
     correlation_matrix : pd.DataFrame
         Precomputed spatial correlation matrix
+    correlation_z : pd.DataFrame
+        Precomputed spatial correlation z-scores matrix
     receptor_source : str
         Key in adata.uns for receptor data
     candidate_receptors : list, optional
@@ -737,6 +847,10 @@ def filter_receptors_by_correlation(
         Percentage of top correlated receptors to keep (e.g., 0.05 for top 5%)
     min_correlation_threshold : float
         Minimum correlation threshold to consider
+    min_z_threshold : float
+        Minimum average z-score threshold for significance
+    top_n : int, optional
+        If provided, select the top N receptors by correlation score, overriding thresholds and top_percent.
     correlation_method : str
         Method to aggregate correlations ('mean', 'median', 'max')
     save_results : bool
@@ -763,13 +877,18 @@ def filter_receptors_by_correlation(
     if tf_key not in regulon_dict:
         raise ValueError(f"Regulon '{tf_key}' not found in regulon_dict")
     
-    # Get candidate receptors (use provided list or all receptors for TF)
-    all_receptors = receptor_data[tf_name]
+    # Get candidate receptors - ALWAYS use all receptors from original receptor_dict
+    # This ensures we always see the total count from the original data
+    original_receptor_data = adata.uns.get('receptor_dict', {})
+    all_receptors = original_receptor_data.get(tf_name, [])
+    
     if candidate_receptors is None:
         candidate_receptors = all_receptors
     else:
-        # Ensure candidate receptors are in the original receptor list
-        candidate_receptors = [r for r in candidate_receptors if r in all_receptors]
+        # Even when candidate_receptors is provided, we want to use all original receptors
+        # for the filtering process to maintain consistency in reporting
+        candidate_receptors = all_receptors
+        print(f"Note: Using all original receptors ({len(all_receptors)}) instead of provided candidate list for consistent filtering")
     
     # Get target genes (use provided list or all regulon targets)
     all_targets = regulon_dict[tf_key]
@@ -793,82 +912,115 @@ def filter_receptors_by_correlation(
     print(f"Found {len(available_receptors)}/{len(candidate_receptors)} receptors and "
           f"{len(available_targets)}/{len(target_genes)} targets in correlation matrix")
     
-    # 3. Calculate correlation scores for each receptor
+    # 3. Calculate correlation scores and z-scores for each receptor
     receptor_scores = {}
+    receptor_z_scores = {}
     receptor_correlations = {}
+    receptor_z_correlations = {}
     receptor_stats = {}
     
     for receptor in available_receptors:
-        # Get correlations between this receptor and all targets
+        # Get correlations and z-scores between this receptor and all targets
         target_correlations = []
+        target_z_scores = []
         receptor_target_pairs = {}
+        receptor_target_z_pairs = {}
         
         for target in available_targets:
             if receptor in correlation_matrix.index and target in correlation_matrix.columns:
                 corr_value = correlation_matrix.loc[receptor, target]
                 target_correlations.append(corr_value)
                 receptor_target_pairs[target] = corr_value
+                
+                z_value = correlation_z.loc[receptor, target]
+                target_z_scores.append(z_value)
+                receptor_target_z_pairs[target] = z_value
         
-        if target_correlations:
+        if target_correlations and target_z_scores:
             # Calculate aggregate correlation score
             if correlation_method == 'mean':
                 agg_correlation = np.mean(target_correlations)
+                agg_z = np.mean(target_z_scores)
             elif correlation_method == 'median':
                 agg_correlation = np.median(target_correlations)
+                agg_z = np.median(target_z_scores)
             elif correlation_method == 'max':
                 agg_correlation = np.max(target_correlations)
+                agg_z = np.max(target_z_scores)
             else:
                 raise ValueError(f"Unknown correlation_method: {correlation_method}")
             
             receptor_scores[receptor] = agg_correlation
+            receptor_z_scores[receptor] = agg_z
             receptor_correlations[receptor] = receptor_target_pairs
+            receptor_z_correlations[receptor] = receptor_target_z_pairs
             receptor_stats[receptor] = {
-                'mean': np.mean(target_correlations),
-                'median': np.median(target_correlations),
-                'std': np.std(target_correlations),
-                'min': np.min(target_correlations),
-                'max': np.max(target_correlations),
+                'mean_corr': np.mean(target_correlations),
+                'median_corr': np.median(target_correlations),
+                'std_corr': np.std(target_correlations),
+                'min_corr': np.min(target_correlations),
+                'max_corr': np.max(target_correlations),
+                'mean_z': np.mean(target_z_scores),
+                'median_z': np.median(target_z_scores),
+                'std_z': np.std(target_z_scores),
+                'min_z': np.min(target_z_scores),
+                'max_z': np.max(target_z_scores),
                 'n_targets': len(target_correlations)
             }
             
-            print(f"  {receptor}: {correlation_method} = {agg_correlation:.4f} "
-                  f"(range: {min(target_correlations):.4f} to {max(target_correlations):.4f})")
+            print(f"  {receptor}: {correlation_method}_corr = {agg_correlation:.4f} "
+                  f"(range: {min(target_correlations):.4f} to {max(target_correlations):.4f}), "
+                  f"{correlation_method}_z = {agg_z:.4f} "
+                  f"(range: {min(target_z_scores):.4f} to {max(target_z_scores):.4f})")
     
     if not receptor_scores:
         raise ValueError("No valid receptor-target correlations computed")
     
-    # 4. Filter receptors based on correlation scores
+    # 4. Filter receptors based on correlation scores and z-scores
     # Sort by correlation score (descending)
     sorted_receptors = sorted(receptor_scores.items(), key=lambda x: x[1], reverse=True)
     
-    # Apply minimum threshold
-    filtered_by_threshold = [(r, s) for r, s in sorted_receptors if s >= min_correlation_threshold]
-    
-    # Select top percentage
-    n_top = max(1, int(len(filtered_by_threshold) * top_percent))
-    top_receptors = filtered_by_threshold[:n_top]
+    # Calculate receptors above thresholds
+    filtered_by_threshold = [
+        (r, s) for r, s in sorted_receptors 
+        if s >= min_correlation_threshold and receptor_z_scores[r] >= min_z_threshold
+    ]
+    num_above_threshold = len(filtered_by_threshold)
     
     print(f"\nFiltering results:")
     print(f"  Total candidate receptors: {len(candidate_receptors)}")
     print(f"  Available in correlation matrix: {len(available_receptors)}")
-    print(f"  Above threshold ({min_correlation_threshold}): {len(filtered_by_threshold)}")
-    print(f"  Top {top_percent*100}% selected: {len(top_receptors)}")
+    print(f"  Above thresholds (corr >= {min_correlation_threshold}, z >= {min_z_threshold}): {num_above_threshold}")
+    
+    # Apply top_n or top_percent
+    if top_n is not None:
+        n_top = min(top_n, len(sorted_receptors))
+        top_receptors = sorted_receptors[:n_top]
+        print(f"  Selected top {top_n} (overriding thresholds and percentage): {len(top_receptors)}")
+    else:
+        n_top = max(1, int(num_above_threshold * top_percent))
+        top_receptors = filtered_by_threshold[:n_top]
+        print(f"  Top {top_percent*100}% selected: {len(top_receptors)}")
     
     # 5. Prepare results
     results = {
         'tf_name': tf_name,
-        'all_receptors': all_receptors,
+        'all_receptors': all_receptors,  # This will now always be from original receptor_dict
         'candidate_receptors': candidate_receptors,
         'available_receptors': available_receptors,
         'filtered_receptors': [r for r, _ in top_receptors],
         'receptor_scores': receptor_scores,
+        'receptor_z_scores': receptor_z_scores,
         'receptor_correlations': receptor_correlations,
+        'receptor_z_correlations': receptor_z_correlations,
         'receptor_stats': receptor_stats,
         'top_receptors_with_scores': top_receptors,
         'target_genes': available_targets,
         'filtering_params': {
             'top_percent': top_percent,
             'min_correlation_threshold': min_correlation_threshold,
+            'min_z_threshold': min_z_threshold,
+            'top_n': top_n,
             'correlation_method': correlation_method,
             'receptor_source': receptor_source
         }
@@ -885,6 +1037,7 @@ def filter_receptors_by_correlation(
             {
                 'receptor': r,
                 'score': s,
+                'z_score': receptor_z_scores[r],
                 **receptor_stats[r]
             }
             for r, s in sorted_receptors
@@ -898,9 +1051,18 @@ def filter_receptors_by_correlation(
     # Print final results
     print(f"\nTop filtered receptors for {tf_name} (by {correlation_method}):")
     for i, (receptor, score) in enumerate(top_receptors, 1):
-        print(f"  {i}. {receptor}: {score:.4f}")
+        z_score = receptor_z_scores[receptor]
+        min_corr = receptor_stats[receptor]['min_corr']
+        max_corr = receptor_stats[receptor]['max_corr']
+        min_z = receptor_stats[receptor]['min_z']
+        max_z = receptor_stats[receptor]['max_z']
+        print(f"  {i}. {receptor}: {correlation_method}_corr = {score:.4f} "
+              f"(range: {min_corr:.4f} to {max_corr:.4f}), "
+              f"{correlation_method}_z = {z_score:.4f} "
+              f"(range: {min_z:.4f} to {max_z:.4f})")
     
     return results
+
 
 
 def plot_receptor_correlation_heatmap(
@@ -949,8 +1111,8 @@ def plot_receptor_correlation_heatmap(
     
     subset_matrix = correlation_matrix.loc[available_receptors, available_targets]
     
-    # Create plot
-    plt.figure(figsize=figsize)
+    # Create plot with custom axes for heatmap and colorbar
+    fig, (ax, cax) = plt.subplots(1, 2, figsize=figsize, gridspec_kw={'width_ratios': [1, 0.05], 'wspace': 0.3})
     
     # Create annotation matrix for filtered receptors
     annot_matrix = None
@@ -964,15 +1126,15 @@ def plot_receptor_correlation_heatmap(
         annot=annot_matrix,
         fmt='g' if annot_matrix is not None else None,
         cbar_kws={'label': 'Spatial Correlation'},
-        xticklabels=True,
-        yticklabels=True
+        ax=ax,
+        cbar_ax=cax
     )
     
-    plt.title(f'{tf_name} Receptor-Target Spatial Correlations {title_suffix}')
-    plt.xlabel('Target Genes')
-    plt.ylabel('Receptor Genes')
-    plt.xticks(rotation=45, ha='right')
-    plt.yticks(rotation=0)
+    ax.set_title(f'{tf_name} Receptor-Target Spatial Correlations {title_suffix}')
+    ax.set_xlabel('Target Genes')
+    ax.set_ylabel('Receptor Genes')
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
+    plt.setp(ax.get_yticklabels(), rotation=0)
     plt.tight_layout()
     
     if save_path:
@@ -1042,33 +1204,6 @@ def plot_receptor_score_distribution(
     plt.show()
 
 
-def update_receptor_dict_with_filtered(
-    adata, 
-    filtering_results: Dict, 
-    target_key: str = 'receptor_dict_filtered'
-) -> None:
-    """
-    Update adata.uns with filtered receptors.
-    
-    Parameters
-    ----------
-    adata : AnnData
-        Annotated data object
-    filtering_results : dict
-        Results from filter_receptors_by_correlation
-    target_key : str
-        Key to store filtered receptors in adata.uns
-    """
-    
-    tf_name = filtering_results['tf_name']
-    filtered_receptors = filtering_results['filtered_receptors']
-    
-    if target_key not in adata.uns:
-        adata.uns[target_key] = {}
-    
-    adata.uns[target_key][tf_name] = filtered_receptors
-    
-    print(f"Updated adata.uns['{target_key}'] with {len(filtered_receptors)} filtered receptors for {tf_name}")
 
 
 # Example usage workflow:
@@ -1081,60 +1216,26 @@ correlation_matrix, correlation_z = compute_global_spatial_correlation_matrix(
     cache=True  # Use cached results if available
 )
 
-# Step 2: Extract receptors from GRN plot
+#IRF4 centered GRN network plot with receptor filtering
 fig, G = plot_grn_network(
     PDAC,
     receptor_source='receptor_dict',
     selected_tfs=['IRF4'],
-    show_receptor=True,
-    min_importance=0.03,
-    figsize=(5, 2.5),
-    edge_length_scale=0.05,
-    title='',
-    show_legend=False
-)
-
-# Get receptor nodes from the network
-all_nodes = list(G.nodes())
-print("Network nodes:", all_nodes)
-
-# Step 3: Filter receptors for IRF4
-filtering_results = filter_receptors_by_correlation(
-    adata=PDAC,
-    tf_name='IRF4',
+    show_receptor=True,  # Exclude receptor nodes and edges
+    min_importance=0.02, # Target genes with importance score >= 
+    filter_receptor=True,
     correlation_matrix=correlation_matrix,
-    top_percent=0.05,  # Keep top 5%
-    min_correlation_threshold=0.1,
-    correlation_method='mean',  # or 'median', 'max'
-    save_results=True
-)
-
-# Step 4: Visualize results
-plot_receptor_correlation_heatmap(
-    correlation_matrix, 
-    filtering_results,
-    show_all_receptors=False,  # Show only filtered receptors
-    save_path='IRF4_receptor_heatmap.png'
-)
-
-plot_receptor_score_distribution(
-    filtering_results,
-    save_path='IRF4_receptor_scores.png'
-)
-
-# Step 5: Update receptor dictionary and replot network
-update_receptor_dict_with_filtered(PDAC, filtering_results)
-
-# Plot network with filtered receptors
-fig, G = plot_grn_network(
-    PDAC,
-    receptor_source='receptor_dict_filtered',  # Use filtered receptors
-    selected_tfs=['IRF4'],
-    show_receptor=True,
-    min_importance=0.03,
-    figsize=(5, 2.5),
-    edge_length_scale=0.05,
-    title='IRF4 Network (Filtered Receptors)',
-    show_legend=False
+    correlation_z=correlation_z,
+    top_n=2, # Overide
+    top_percent=1,  # Keep top ratio
+    min_correlation_threshold=0.05,
+    min_z_threshold= 5.5, # p<0.00000005
+    figsize=(5, 3),
+    title='', # No title
+    show_legend=False,
+    show_heatmap=True,
+    show_score_dist=True,
+    heatmap_figsize=(7, 4),     
+    score_dist_figsize=(7, 4)    
 )
 """
