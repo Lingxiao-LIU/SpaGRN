@@ -15,6 +15,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 
+
 def isr_heatmap(adata, 
                 cluster_label='subleiden', 
                 isr_mtx=None,
@@ -32,7 +33,8 @@ def isr_heatmap(adata,
                 vmax=None,
                 yticklabels=True,
                 xticklabels=True,
-                show_cell_type_colors=False):  # Changed default to False
+                show_cell_type_colors=False,  # Changed default to False
+                ytick_rotation=0):  # New parameter for y-axis tick label rotation
     """
     Create a comprehensive ISR (regulon activity) heatmap with proper cell type annotations
     
@@ -70,6 +72,8 @@ def isr_heatmap(adata,
         Whether to show axis labels
     show_cell_type_colors : bool
         Whether to show cell type color annotations
+    ytick_rotation : float
+        Rotation angle for y-axis tick labels (default: 0)
     """
     
     # Get ISR matrix
@@ -134,8 +138,19 @@ def isr_heatmap(adata,
     # Set up the figure
     plt.figure(figsize=figsize)
     
+    # Determine if using clustermap (which has y labels on right)
+    is_clustermap = row_cluster or col_cluster
+    
+    # Compute ha for y ticks based on side
+    if is_clustermap:
+        # y labels on right
+        ha_y = 'left' if ytick_rotation == 0 else 'center'
+    else:
+        # y labels on left
+        ha_y = 'right' if ytick_rotation == 0 else 'center'
+    
     # Create clustermap if clustering is requested
-    if row_cluster or col_cluster:
+    if is_clustermap:
         # Create clustermap without row colors
         g = sns.clustermap(heatmap_data,
                           row_cluster=row_cluster,
@@ -152,7 +167,7 @@ def isr_heatmap(adata,
         
         # Add colorbar label
         g.ax_cbar.set_ylabel('ISR Score', fontsize=14, rotation=90, labelpad=15)
-        g.ax_cbar.tick_params(labelsize=14)  # Increase colorbar tick label size
+        g.ax_cbar.tick_params(labelsize=11)  # Increase colorbar tick label size
         
         # Improve axis labels
         g.ax_heatmap.set_xlabel('Regulons', fontsize=18)
@@ -160,9 +175,9 @@ def isr_heatmap(adata,
         
         # Rotate x-axis labels and increase tick size for better readability
         if xticklabels:
-            g.ax_heatmap.set_xticklabels(g.ax_heatmap.get_xticklabels(), rotation=45, ha='right', fontsize=18)
+            g.ax_heatmap.set_xticklabels(g.ax_heatmap.get_xticklabels(), rotation=45, ha='right', va='top', fontsize=18)
         if yticklabels:
-            g.ax_heatmap.set_yticklabels(g.ax_heatmap.get_yticklabels(), fontsize=18)
+            g.ax_heatmap.set_yticklabels(g.ax_heatmap.get_yticklabels(), rotation=ytick_rotation, ha=ha_y, va='center', fontsize=18)
         
         # Move title above the top dendrogram
         title_text = f'ISR Heatmap ({len(heatmap_data.columns)} regulons, {len(heatmap_data.index)} cell types)'
@@ -173,7 +188,7 @@ def isr_heatmap(adata,
     else:
         # Create simple heatmap without clustering
         plt.figure(figsize=figsize)
-        sns.heatmap(heatmap_data,
+        ax = sns.heatmap(heatmap_data,
                    cmap=cmap,
                    vmin=vmin,
                    vmax=vmax,
@@ -185,8 +200,10 @@ def isr_heatmap(adata,
         plt.ylabel('Cell Types', fontsize=18)
         
         # Rotate x-axis labels and increase tick size for better readability
-        plt.xticks(fontsize=18, rotation=45, ha='right')
-        plt.yticks(fontsize=18)
+        if xticklabels:
+            ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right', va='top', fontsize=18)
+        if yticklabels:
+            ax.set_yticklabels(ax.get_yticklabels(), rotation=ytick_rotation, ha=ha_y, va='center', fontsize=18)
         
         plt.title(f'ISR Heatmap ({len(heatmap_data.columns)} regulons, {len(heatmap_data.index)} cell types)', 
                   fontsize=18, pad=20)
@@ -206,6 +223,159 @@ def isr_heatmap(adata,
     print(f"  - Data range: {heatmap_data.values.min():.3f} to {heatmap_data.values.max():.3f}")
     
     return heatmap_data
+
+
+
+def isr_violin(adata, 
+               selected_regulons=None,  # List of regulons or single string; if None, all regulons
+               cell_type_label='cell_type',  # Column in adata.obs for cell types (x-axis)
+               condition_label='condition',  # Column in adata.obs for conditions (hue)
+               excluded_cell_types=None,  # List of cell types to exclude
+               excluded_conditions=None,  # List of conditions to exclude
+               save=False,
+               filename='isr_violin.pdf',
+               figsize=(12, 6),
+               split=True,  # Whether to split violins by hue
+               inner='box',  # Inner plot style: 'box', 'quartile', 'point', 'stick', or None
+               palette=None,  # Color palette for hues
+               col_wrap=4,  # Number of columns before wrapping if multiple regulons
+               height=6,  # Height of each facet
+               aspect=1):  # Aspect ratio of each facet
+    """
+    Create violin plots for ISR (regulon activity) scores across cell types and conditions.
+    
+    Parameters:
+    -----------
+    adata : AnnData object
+        Single cell data with regulon activity scores in adata.obsm['isr']
+    selected_regulons : list, str, or None
+        List of specific regulon names to plot, or a single string. If None, plots all regulons.
+    cell_type_label : str
+        Column name in adata.obs containing cell type annotations (x-axis)
+    condition_label : str
+        Column name in adata.obs containing condition annotations (hue)
+    excluded_cell_types : list or None
+        List of cell type names to exclude from the plot
+    excluded_conditions : list or None
+        List of condition names to exclude from the plot
+    save : bool
+        Whether to save the figure
+    filename : str
+        Filename for saving
+    figsize : tuple
+        Approximate figure size (used to calculate aspect if needed)
+    split : bool
+        If True and hue has two categories, split the violin
+    inner : str or None
+        Style of the inner plot
+    palette : dict or list or None
+        Colors for the hue categories
+    col_wrap : int
+        Wrap facets after this many columns
+    height : float
+        Height of each facet in inches
+    aspect : float
+        Aspect ratio of each facet (width/height)
+    """
+    
+    # Get ISR matrix from adata.obsm['isr']
+    if 'isr' not in adata.obsm:
+        raise ValueError("ISR matrix not found. Please ensure adata.obsm['isr'] exists")
+    
+    # Check if it's already a DataFrame with columns, if not convert it
+    if isinstance(adata.obsm['isr'], pd.DataFrame):
+        isr_mtx = adata.obsm['isr'].copy()
+    else:
+        # Convert to DataFrame, preserving index
+        isr_mtx = pd.DataFrame(adata.obsm['isr'], index=adata.obs_names)
+    
+    # Handle selected regulons
+    if selected_regulons is None:
+        selected_regulons = list(isr_mtx.columns)
+    elif isinstance(selected_regulons, str):
+        selected_regulons = [selected_regulons]
+    
+    # Filter to selected regulons
+    available_regulons = set(isr_mtx.columns).intersection(selected_regulons)
+    if not available_regulons:
+        raise ValueError(f"None of the selected regulons {selected_regulons} found in ISR matrix columns: {list(isr_mtx.columns)}")
+    isr_mtx = isr_mtx[list(available_regulons)]
+    
+    # Get relevant obs columns
+    obs_df = adata.obs[[cell_type_label, condition_label]].copy()
+    
+    # Create mask for exclusions
+    mask = pd.Series(True, index=obs_df.index)
+    if excluded_cell_types is not None:
+        mask &= ~obs_df[cell_type_label].isin(excluded_cell_types)
+        print(f"Excluded cell types: {excluded_cell_types}")
+    if excluded_conditions is not None:
+        mask &= ~obs_df[condition_label].isin(excluded_conditions)
+        print(f"Excluded conditions: {excluded_conditions}")
+    
+    # Apply mask
+    obs_df = obs_df.loc[mask]
+    isr_mtx = isr_mtx.loc[mask]
+    print(f"Remaining cell types: {sorted(obs_df[cell_type_label].unique())}")
+    print(f"Remaining conditions: {sorted(obs_df[condition_label].unique())}")
+    
+    # Create long-form DataFrame for plotting
+    long_df = pd.melt(isr_mtx.reset_index(), 
+                      id_vars=['index'], 
+                      value_vars=list(isr_mtx.columns), 
+                      var_name='Regulon', 
+                      value_name='ISR Score')
+    long_df = long_df.set_index('index')
+    long_df = long_df.join(obs_df)
+    
+    # Check if split is valid (only works with exactly 2 hue levels)
+    n_conditions = obs_df[condition_label].nunique()
+    use_split = split and n_conditions == 2
+    if split and n_conditions != 2:
+        print(f"Warning: split=True requires exactly 2 conditions, but found {n_conditions}. Setting split=False.")
+    
+    # Create the violin plot using catplot for faceting by regulon
+    g = sns.catplot(
+        data=long_df,
+        x=cell_type_label,
+        y='ISR Score',
+        hue=condition_label,
+        col='Regulon',
+        col_wrap=col_wrap if len(selected_regulons) > 1 else None,
+        kind='violin',
+        split=use_split,
+        inner=inner,
+        palette=palette,
+        height=height,
+        aspect=aspect,
+        legend_out=True
+    )
+    
+    # Rotate x-axis labels for readability
+    for ax in g.axes.flat:
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right')
+    
+    # Add title
+    g.fig.suptitle(f'ISR Violin Plots ({len(selected_regulons)} regulons)', y=1.02, fontsize=16)
+    
+    # Adjust layout
+    g.tight_layout()
+    
+    if save:
+        g.savefig(filename, dpi=300, bbox_inches='tight')
+        print(f"Violin plot saved as {filename}")
+    
+    plt.show()
+    
+    # Print summary information
+    print(f"Violin plot created with:")
+    print(f"  - Regulons: {', '.join(selected_regulons)}")
+    print(f"  - Cell types: {', '.join(sorted(obs_df[cell_type_label].unique()))}")
+    print(f"  - Conditions: {', '.join(sorted(obs_df[condition_label].unique()))}")
+    print(f"  - Number of cells: {len(long_df) // len(selected_regulons)}")
+    
+    return g
+
 
 
 def create_individual_cell_heatmap(adata,
