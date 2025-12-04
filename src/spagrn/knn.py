@@ -53,10 +53,16 @@ def neighbors_and_weights(latent, n_neighbors=30, neighborhood_factor=3, approx_
     
     return neighbors, weights_n
 
+
+
+
+
 def neighbors_and_weights_batch_aware(latent, n_neighbors=30, neighborhood_factor=3, 
                                     approx_neighbors=True, batch_key=None, adata=None):
     """
-    Compute neighbors and weights with batch awareness
+    Compute neighbors and weights with batch awareness.
+    Cells only connect to neighbors within the same batch.
+    
     :param latent: DataFrame of spatial coordinates
     :param n_neighbors: Number of neighbors
     :param neighborhood_factor: Factor for computing weights
@@ -71,6 +77,7 @@ def neighbors_and_weights_batch_aware(latent, n_neighbors=30, neighborhood_facto
     from .autocor import compute_weights
     import warnings
     
+    # Fallback to non-batch-aware if batch_key not provided
     if batch_key is None or adata is None or batch_key not in adata.obs.columns:
         return neighbors_and_weights(latent, n_neighbors, neighborhood_factor, approx_neighbors)
     
@@ -79,62 +86,74 @@ def neighbors_and_weights_batch_aware(latent, n_neighbors=30, neighborhood_facto
     neighbors_list = []
     weights_list = []
     
+    print(f"Processing {len(unique_batches)} batches for batch-aware neighbor computation...")
+    
     for batch in unique_batches:
         batch_mask = batches == batch
         batch_indices = np.where(batch_mask)[0]
         batch_latent = latent.loc[adata.obs_names[batch_mask]]
         batch_obs_names = adata.obs_names[batch_mask].to_numpy()  # Convert to NumPy array
         
-        # Dynamically adjust n_neighbors for small batches
-        batch_n_neighbors = min(n_neighbors, max(1, len(batch_indices) - 1))
-        if len(batch_indices) < n_neighbors + 1:
-            warnings.warn(f"Batch {batch} has {len(batch_indices)} cells, less than n_neighbors+1 ({n_neighbors+1}). Using n_neighbors={batch_n_neighbors}.")
+        n_batch_cells = len(batch_obs_names)
+        print(f"  Batch '{batch}': {n_batch_cells} cells")
         
+        # Dynamically adjust n_neighbors for small batches
+        batch_n_neighbors = min(n_neighbors, max(1, n_batch_cells - 1))
+        if n_batch_cells < n_neighbors + 1:
+            warnings.warn(f"Batch '{batch}' has {n_batch_cells} cells, less than n_neighbors+1 ({n_neighbors+1}). Using n_neighbors={batch_n_neighbors}.")
+        
+        # Handle edge case: batch with only 1 cell
         if batch_n_neighbors == 0:
             batch_neighbors = pd.DataFrame(
-                np.full((len(batch_indices), n_neighbors), np.nan),
+                np.full((n_batch_cells, n_neighbors), np.nan),
                 index=batch_obs_names
             )
             batch_weights = pd.DataFrame(
-                np.zeros((len(batch_indices), n_neighbors)),
+                np.zeros((n_batch_cells, n_neighbors)),
                 index=batch_obs_names
             )
             neighbors_list.append(batch_neighbors)
             weights_list.append(batch_weights)
             continue
         
+        # Compute KNN within this batch
         if approx_neighbors:
-            nnd = NNDescent(batch_latent, n_neighbors=batch_n_neighbors + 1)
+            nnd = NNDescent(batch_latent.values, n_neighbors=batch_n_neighbors + 1)
             indices, distances = nnd.neighbor_graph
             indices = indices[:, 1:]  # Skip self
             distances = distances[:, 1:]
         else:
             from sklearn.neighbors import NearestNeighbors
-            nbrs = NearestNeighbors(n_neighbors=batch_n_neighbors + 1, algorithm='auto').fit(batch_latent)
-            distances, indices = nbrs.kneighbors(batch_latent)
+            nbrs = NearestNeighbors(n_neighbors=batch_n_neighbors + 1, algorithm='auto').fit(batch_latent.values)
+            distances, indices = nbrs.kneighbors(batch_latent.values)
             indices = indices[:, 1:]
             distances = distances[:, 1:]
         
-        # Pad indices and distances to match n_neighbors
-        if indices.shape[1] < n_neighbors:
-            pad_width = n_neighbors - indices.shape[1]
-            indices = np.pad(indices, ((0, 0), (0, pad_width)), mode='constant', constant_values=-1)
-            distances = np.pad(distances, ((0, 0), (0, pad_width)), mode='constant', constant_values=0.0)
+        # Create result arrays with proper shape (n_batch_cells × n_neighbors)
+        result_neighbors = np.full((n_batch_cells, n_neighbors), np.nan, dtype=object)
+        result_weights = np.zeros((n_batch_cells, n_neighbors), dtype=float)
         
-        # Map batch-local indices to global cell names
-        valid_indices = indices != -1
-        batch_neighbors = pd.DataFrame(
-            np.where(valid_indices, batch_obs_names[indices], np.nan),
-            index=batch_obs_names
-        )
-        weights_n = compute_weights(distances, neighborhood_factor=neighborhood_factor)
-        weights_n = pd.DataFrame(
-            np.where(valid_indices, weights_n, 0.0),
-            index=batch_obs_names
-        )
+        # Compute weights for actual neighbors
+        weights_computed = compute_weights(distances, neighborhood_factor=neighborhood_factor)
+        
+        # Fill in the actual neighbors (up to batch_n_neighbors)
+        # CRITICAL: indices are 0-indexed within the batch, so they should be < n_batch_cells
+        for i in range(n_batch_cells):
+            for j in range(batch_n_neighbors):
+                neighbor_idx = indices[i, j]
+                # Validate index is within bounds
+                if 0 <= neighbor_idx < n_batch_cells:
+                    result_neighbors[i, j] = batch_obs_names[neighbor_idx]
+                    result_weights[i, j] = weights_computed[i, j]
+                else:
+                    # This shouldn't happen, but log if it does
+                    warnings.warn(f"Invalid neighbor index {neighbor_idx} for cell {i} in batch '{batch}' (size {n_batch_cells})")
+        
+        batch_neighbors = pd.DataFrame(result_neighbors, index=batch_obs_names)
+        batch_weights = pd.DataFrame(result_weights, index=batch_obs_names)
         
         neighbors_list.append(batch_neighbors)
-        weights_list.append(weights_n)
+        weights_list.append(batch_weights)
     
     if not neighbors_list:
         raise ValueError("No valid batches found. Check batch_key or increase n_neighbors.")
@@ -143,19 +162,24 @@ def neighbors_and_weights_batch_aware(latent, n_neighbors=30, neighborhood_facto
     neighbors = pd.concat(neighbors_list)
     weights_n = pd.concat(weights_list)
     
-    # Reindex to match adata.obs_names
+    # Reindex to match adata.obs_names order
     neighbors = neighbors.reindex(adata.obs_names, fill_value=np.nan)
     weights_n = weights_n.reindex(adata.obs_names, fill_value=0.0)
     
-    # Validate neighbor names
-    invalid_neighbors = neighbors.apply(lambda x: x[~x.isna()].isin(adata.obs_names).all(), axis=1)
-    if not invalid_neighbors.all():
-        invalid_cells = invalid_neighbors[~invalid_neighbors].index
-        warnings.warn(f"Found invalid neighbor names for {len(invalid_cells)} cells. Setting to NaN.")
-        neighbors.loc[invalid_cells] = np.nan
-        weights_n.loc[invalid_cells] = 0.0
+    # Validate neighbor names exist in dataset
+    all_valid = True
+    for col in neighbors.columns:
+        non_null = neighbors[col].dropna()
+        if len(non_null) > 0:
+            invalid = ~non_null.isin(adata.obs_names)
+            if invalid.any():
+                all_valid = False
+                warnings.warn(f"Found {invalid.sum()} invalid neighbor names in column {col}")
+    
+    print(f"Batch-aware neighbor computation complete: {neighbors.notna().sum().sum()} total neighbor connections")
     
     return neighbors, weights_n
+
 
 
 

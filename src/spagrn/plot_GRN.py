@@ -30,7 +30,6 @@ def plot_grn_network(
     edge_length_scale: float = 1.0,
     show_edge_labels: bool = False,
     color_scheme: str = 'default',
-    figsize: Tuple[int, int] = (8, 7),
     save_path: Optional[str] = None,
     title: Optional[str] = None,
     show_legend: bool = True,
@@ -46,7 +45,7 @@ def plot_grn_network(
     correlation_method: str = 'mean',
     show_heatmap: bool = False,
     show_score_dist: bool = False,
-    heatmap_figsize: Tuple[int, int] = (12, 8),      
+    figsize: Tuple[int, int] = (12, 8),      
     score_dist_figsize: Tuple[int, int] = (10, 6),   
 ) -> Tuple[plt.Figure, nx.DiGraph]:
     """
@@ -113,7 +112,7 @@ def plot_grn_network(
         Whether to show receptor-target correlation heatmap
     show_score_dist : bool, default False
         Whether to show receptor score distribution plot
-    heatmap_figsize : tuple, default (12, 8)
+    figsize : tuple, default (12, 8)
         Figure size for correlation heatmap (width, height)
     score_dist_figsize : tuple, default (10, 6)
         Figure size for score distribution plot (width, height)
@@ -466,7 +465,7 @@ def plot_grn_network(
                     correlation_matrix=correlation_matrix,
                     filtering_results=results,
                     show_all_receptors=False,
-                    figsize=heatmap_figsize,  # CHANGE THIS LINE
+                    figsize=figsize,  # CHANGE THIS LINE
                     save_path=None
                 )
 
@@ -1235,7 +1234,7 @@ fig, G = plot_grn_network(
     show_legend=False,
     show_heatmap=True,
     show_score_dist=True,
-    heatmap_figsize=(7, 4),     
+    figsize=(7, 4),     
     score_dist_figsize=(7, 4)    
 )
 """
