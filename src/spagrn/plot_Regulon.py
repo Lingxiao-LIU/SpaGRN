@@ -1116,7 +1116,7 @@ def isr_test(
             warnings.warn(f"Overall test failed for {regulon}: {e}")
 
         # Pairwise post-hoc (with fold-change)
-        if post_hoc and n_groups > 2:
+        if post_hoc:
             for ct1, ct2 in combinations(cell_types_filtered, 2):
                 g1 = data[data[cell_type_col] == ct1]['ISR Score']
                 g2 = data[data[cell_type_col] == ct2]['ISR Score']
@@ -1187,6 +1187,8 @@ def isr_test(
                            palette=palette, inner=inner, split=split and n_groups==2, ax=ax, alpha=alpha)
             if jitter: sns.stripplot(data=df_plot, x=cell_type_col, y='ISR Score', order=cell_types_filtered,
                                      color='black', alpha=0.3, size=2, ax=ax)
+            ax.set_xlim(-0.5, n_groups - 0.5)
+            
         elif plot_style == 'box':
             sns.boxplot(data=df_plot, x=cell_type_col, y='ISR Score', order=cell_types_filtered,
                         palette=palette, ax=ax, boxprops=dict(alpha=alpha))

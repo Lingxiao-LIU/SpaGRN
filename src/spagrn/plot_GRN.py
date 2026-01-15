@@ -112,8 +112,6 @@ def plot_grn_network(
         Whether to show receptor-target correlation heatmap
     show_score_dist : bool, default False
         Whether to show receptor score distribution plot
-    figsize : tuple, default (12, 8)
-        Figure size for correlation heatmap (width, height)
     score_dist_figsize : tuple, default (10, 6)
         Figure size for score distribution plot (width, height)
 
@@ -396,9 +394,7 @@ def plot_grn_network(
             )
 
     # Draw labels with dynamic offset based on figure size
-    label_offset = 0.05 * min(figsize) * edge_length_scale  # Scale offset with figure size
-    label_pos = {node: (x, y + label_offset) for node, (x, y) in pos.items()}
-    nx.draw_networkx_labels(G, label_pos, font_size=font_size, ax=ax)
+    nx.draw_networkx_labels(G, pos, font_size=font_size, ax=ax)
 
     # Draw edge labels if requested
     if show_edge_labels:
@@ -439,8 +435,8 @@ def plot_grn_network(
         ax.set_title(title, fontsize=18, fontweight='bold')
 
     # Adjust plot margins to prevent clipping
-    x_coords = [x for x, y in pos.values()] + [x for x, y in label_pos.values()]
-    y_coords = [y for x, y in pos.values()] + [y for x, y in label_pos.values()]
+    x_coords = [x for x, y in pos.values()]
+    y_coords = [y for x, y in pos.values()]
     if x_coords and y_coords:
         x_margin = 0.3 * (max(x_coords) - min(x_coords)) + 0.1
         y_margin = 0.3 * (max(y_coords) - min(y_coords)) + 0.1
