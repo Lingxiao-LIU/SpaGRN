@@ -2355,11 +2355,14 @@ def rss_rank_plot(adata,
                   cell_types=None,
                   rss_df=None,
                   matrix_key='isr',
+                  cache=True,
+                  recompute=False,
                   top_n=5,
                   ncols=4,
                   figsize=None,
                   dot_color='#1f77b4',
                   label_color='red',
+                  label_style='repel',
                   save=None,
                   dpi=300,
                   show=True,
@@ -2397,6 +2400,12 @@ def rss_rank_plot(adata,
     matrix_key : str, default 'isr'
         Key in ``adata.obsm`` for the activity matrix used when computing RSS
         from ``cluster_label`` (e.g. ``'isr'`` for spatial scores, ``'auc_mtx'``).
+    cache : bool, default True
+        When computing RSS from ``cluster_label``, cache the result in
+        ``adata.uns['rss_{matrix_key}_{cluster_label}']`` and reuse it on later
+        calls so the same column/matrix is not recomputed.
+    recompute : bool, default False
+        Force recomputation even if a cached RSS exists (refreshes the cache).
     top_n : int, default 5
         Number of top regulons to highlight/label per cell type.
     ncols : int, default 4
@@ -2406,7 +2415,13 @@ def rss_rank_plot(adata,
     dot_color : str
         Color for the ranked points.
     label_color : str
-        Color for the highlighted top_n points.
+        Color for the highlighted top_n points (and the 'list' labels).
+    label_style : {'repel', 'list', 'none'}, default 'repel'
+        How to label the top_n regulons. 'repel' places names at each point and
+        spreads them with adjustText; 'list' shows a numbered, never-overlapping
+        stack in the upper-right corner (best when top RSS values are nearly tied,
+        e.g. a flat curve); 'none' highlights points without text. 'repel' falls
+        back to 'list' automatically if adjustText is not installed.
     save : str or None
         If given, save the figure to this path.
     dpi : int, default 300
@@ -2425,17 +2440,28 @@ def rss_rank_plot(adata,
         if isinstance(adata, pd.DataFrame):
             rss_df = adata
         elif cluster_label is not None:
-            # Recompute RSS from the chosen activity matrix + cell-type column
+            # Compute RSS from the chosen activity matrix + cell-type column,
+            # caching in adata.uns so repeated calls on the same column/matrix
+            # don't recompute the (potentially slow) Jensen-Shannon RSS.
             from .network import regulon_specificity_scores
             if cluster_label not in adata.obs.columns:
                 raise ValueError(
                     f"cluster_label '{cluster_label}' not found in adata.obs. "
                     f"Available: {list(adata.obs.columns)}")
-            activity = _resolve_activity_matrix(adata, matrix_key)
-            rss_df = regulon_specificity_scores(activity, adata.obs[cluster_label])
-            print(f"Computed RSS from adata.obsm['{matrix_key}'] grouped by "
-                  f"'{cluster_label}' ({rss_df.shape[0]} cell types x "
-                  f"{rss_df.shape[1]} regulons)")
+            cache_key = f'rss_{matrix_key}_{cluster_label}'
+            if cache and not recompute and cache_key in adata.uns:
+                rss_df = adata.uns[cache_key]
+                print(f"Using cached RSS from adata.uns['{cache_key}'] "
+                      f"(pass recompute=True to refresh)")
+            else:
+                activity = _resolve_activity_matrix(adata, matrix_key)
+                rss_df = regulon_specificity_scores(activity, adata.obs[cluster_label])
+                if cache:
+                    adata.uns[cache_key] = rss_df
+                print(f"Computed RSS from adata.obsm['{matrix_key}'] grouped by "
+                      f"'{cluster_label}' ({rss_df.shape[0]} cell types x "
+                      f"{rss_df.shape[1]} regulons)"
+                      + (f"; cached in adata.uns['{cache_key}']" if cache else ""))
         elif hasattr(adata, 'uns') and 'rss' in adata.uns:
             rss_df = adata.uns['rss']
         else:
@@ -2469,6 +2495,12 @@ def rss_rank_plot(adata,
     fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
     axes_flat = axes.ravel()
 
+    # When top RSS values are nearly tied (flat curve), inline labels collide;
+    # 'list' is a deterministic fallback that never overlaps.
+    style = label_style if label_style in ('repel', 'list', 'none') else 'repel'
+    if style == 'repel' and not has_adjust:
+        style = 'list'   # no adjustText available -> use the guaranteed layout
+
     for i, ct in enumerate(cell_types):
         ax = axes_flat[i]
         data = rss_df.loc[ct].sort_values(ascending=False)
@@ -2476,13 +2508,32 @@ def rss_rank_plot(adata,
         ax.scatter(ranks, data.values, s=10, color=dot_color,
                    edgecolors='none', alpha=0.8)
 
-        texts = []
-        for r, (name, val) in enumerate(data.head(top_n).items(), start=1):
+        top = data.head(top_n)
+        for r, (name, val) in enumerate(top.items(), start=1):
             ax.scatter(r, val, s=14, color=label_color, zorder=3)
-            texts.append(ax.text(r, val, str(name), fontsize=9))
-        if has_adjust and texts:
-            adjust_text(texts, ax=ax,
-                        arrowprops=dict(arrowstyle='-', color='gray', lw=0.5))
+
+        if style == 'repel':
+            # Headroom on the right so repelled labels have somewhere to go
+            ax.set_xlim(-0.5, len(data) * 1.18)
+            texts = [ax.text(r, val, str(name), fontsize=9)
+                     for r, (name, val) in enumerate(top.items(), start=1)]
+            adjust_text(
+                texts, ax=ax,
+                expand_text=(1.3, 1.6), expand_points=(1.3, 1.6),
+                force_text=(0.5, 1.0), only_move={'text': 'xy'},
+                arrowprops=dict(arrowstyle='-', color='gray', lw=0.5),
+            )
+        elif style == 'list':
+            # Deterministic stacked list in the upper-right; rank number ties
+            # each line back to its highlighted red point (left-to-right).
+            ax.set_xlim(-0.5, len(data) * 1.05)
+            lines = [f"{k}. {name}" for k, (name, _) in enumerate(top.items(), start=1)]
+            ax.text(0.97, 0.97, "\n".join(lines),
+                    transform=ax.transAxes, ha='right', va='top',
+                    fontsize=8, color=label_color,
+                    linespacing=1.4,
+                    bbox=dict(boxstyle='round,pad=0.3', fc='white',
+                              ec='0.8', alpha=0.85))
 
         ax.set_title(str(ct), fontsize=12)
         ax.set_xlabel('Regulon rank')
