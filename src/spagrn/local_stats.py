@@ -1,3 +1,5 @@
+import os
+import sys
 import numpy as np
 from numba import jit
 from tqdm import tqdm
@@ -39,9 +41,9 @@ def local_cov_weights(x, neighbors, weights):
 @jit(nopython=True)
 def compute_moments_weights_slow(mu, x2, neighbors, weights):
     """
-    This version exaustively iterates over all |E|^2 terms
+    This version exhaustively iterates over all |E|^2 terms
     to compute the expected moments exactly.  Used to test
-    the more optimized formulations that follow
+    the more optimized formulations that follow.
     """
 
     N = neighbors.shape[0]
@@ -165,86 +167,100 @@ def compute_local_cov_max(node_degrees, vals):
 
     return tot / 2
 
-def initializer(neighbors, weights, num_umi, model, centered, Wtot2, D):
-    global g_neighbors
-    global g_weights
-    global g_num_umi
-    global g_model
-    global g_centered
-    global g_Wtot2
-    global g_D
-    g_neighbors = neighbors
-    g_weights = weights
-    g_num_umi = num_umi
-    g_model = model
-    g_centered = centered
-    g_Wtot2 = Wtot2
-    g_D = D
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
+def _job_wrapper(args):
+    """Top-level wrapper so joblib can pickle it cleanly."""
+    vals, neighbors, weights, num_umi, model, centered, Wtot2, D, batches = args
+    return _compute_hs_inner(vals, neighbors, weights, num_umi, model, centered, Wtot2, D, batches)
+
 
 def compute_hs(
-    counts, neighbors, weights, num_umi, model, genes, centered=False, jobs=1
+    counts, neighbors, weights, num_umi, model, genes,
+    centered=False, jobs=1, batches=None
 ):
+    """Compute Hotspot autocorrelation scores.
 
-    neighbors = neighbors.values
-    weights = weights.values
-    num_umi = num_umi.values
+    Uses joblib with the 'loky' backend for parallelism, which works correctly
+    on Windows, Linux, and macOS regardless of array size. Large shared arrays
+    (neighbors, weights, num_umi, D) are passed via joblib's memory-mapping
+    so they are never fully copied into each worker process.
+    """
+    from joblib import Parallel, delayed, dump, load
+    import tempfile
 
-    D = compute_node_degree(neighbors, weights)
-    Wtot2 = (weights**2).sum()
+    neighbors_arr = np.ascontiguousarray(neighbors.values).astype(np.int64)
+    weights_arr   = np.ascontiguousarray(weights.values).astype(np.float64)
+    num_umi_arr   = np.ascontiguousarray(num_umi.values).astype(np.float64)
 
-    def data_iter():
-        for i in range(counts.shape[0]):
-            vals = counts[i]
-            if issparse(vals):
-                vals = vals.toarray().ravel()
-            vals = vals.astype("double")
-            yield vals
+    D     = compute_node_degree(neighbors_arr, weights_arr)
+    Wtot2 = (weights_arr ** 2).sum()
+
+    # Pre-extract all gene vectors into a list (sparse-safe)
+    n_genes = counts.shape[0]
+    all_vals = []
+    for i in range(n_genes):
+        v = counts[i]
+        if issparse(v):
+            v = v.toarray().ravel()
+        all_vals.append(v.astype("double"))
 
     if jobs > 1:
-        with multiprocessing.Pool(
-            processes=jobs, 
-            initializer=initializer, 
-            initargs=[neighbors, weights, num_umi, model, centered, Wtot2, D]
-        ) as pool:
-            results = list(
-                tqdm(
-                    pool.imap(
-                        _map_fun_parallel,
-                        data_iter()
-                    ), 
-                    total=counts.shape[0]
+        # ------------------------------------------------------------------
+        # Write large shared arrays to a memory-mapped temp file.
+        # joblib workers will load them as read-only mmaps — zero copy cost,
+        # works on all platforms, no pipe-size limits.
+        # ------------------------------------------------------------------
+        tmp_dir = tempfile.mkdtemp(prefix="spagrn_hs_")
+        try:
+            mmap_path = os.path.join(tmp_dir, "shared_arrays.pkl")
+            dump(
+                (neighbors_arr, weights_arr, num_umi_arr, D, Wtot2, model, centered, batches),
+                mmap_path,
+                compress=False,
+            )
+            shared = load(mmap_path, mmap_mode="r")
+            nbr_m, wgt_m, umi_m, D_m, Wtot2_m, model_m, centered_m, batches_m = shared
+
+            results = Parallel(n_jobs=jobs, backend="loky", verbose=0)(
+                delayed(_compute_hs_inner)(
+                    vals, nbr_m, wgt_m, umi_m,
+                    model_m, centered_m, Wtot2_m, D_m, batches_m
                 )
+                for vals in tqdm(all_vals, total=n_genes)
             )
+        finally:
+            import shutil
+            shutil.rmtree(tmp_dir, ignore_errors=True)
     else:
-
-        def _map_fun(vals):
-            return _compute_hs_inner(
-                vals, neighbors, weights, num_umi, model, centered, Wtot2, D
+        results = [
+            _compute_hs_inner(
+                vals, neighbors_arr, weights_arr, num_umi_arr,
+                model, centered, Wtot2, D, batches
             )
-
-        results = list(tqdm(map(_map_fun, data_iter()), total=counts.shape[0]))
+            for vals in tqdm(all_vals, total=n_genes)
+        ]
 
     results = pd.DataFrame(results, index=genes, columns=["G", "EG", "stdG", "Z", "C"])
 
     results["Pval"] = norm.sf(results["Z"].values)
-    results["FDR"] = multipletests(results["Pval"], method="fdr_bh")[1]
+    results["FDR"]  = multipletests(results["Pval"], method="fdr_bh")[1]
 
     results = results.sort_values("Z", ascending=False)
     results.index.name = "Gene"
 
-    results = results[["C", "Z", "Pval", "FDR"]]  # Remove other columns
-
-    return results
+    return results[["C", "Z", "Pval", "FDR"]]
 
 
-def _compute_hs_inner(vals, neighbors, weights, num_umi, model, centered, Wtot2, D):
-    """
-    Note, since this is an inner function, for parallelization to work well
-    none of the contents of the function can use MKL or OPENBLAS threads.
-    Or else we open too many.  Because of this, some simple numpy operations
-    are re-implemented using numba instead as it's difficult to control
-    the number of threads in numpy after it's imported
-    """
+# ---------------------------------------------------------------------------
+# Inner computation (called by both single- and multi-process paths)
+# ---------------------------------------------------------------------------
+
+def _compute_hs_inner(vals, neighbors, weights, num_umi, model, centered, Wtot2, D, batches=None):
+    """Compute Hotspot statistics for a single gene."""
 
     if model == "bernoulli":
         vals = (vals > 0).astype("double")
@@ -258,7 +274,10 @@ def _compute_hs_inner(vals, neighbors, weights, num_umi, model, centered, Wtot2,
     else:
         raise Exception("Invalid Model: {}".format(model))
 
-    if centered:
+    # Apply batch correction if batches are provided
+    if batches is not None and centered:
+        vals = apply_batch_correction(vals, mu, var, batches)
+    elif centered:
         vals = center_values(vals, mu, var)
 
     G = local_cov_weights(vals, neighbors, weights)
@@ -278,14 +297,19 @@ def _compute_hs_inner(vals, neighbors, weights, num_umi, model, centered, Wtot2,
     return [G, EG, stdG, Z, C]
 
 
-def _map_fun_parallel(vals):
-    global g_neighbors
-    global g_weights
-    global g_num_umi
-    global g_model
-    global g_centered
-    global g_Wtot2
-    global g_D
-    return _compute_hs_inner(
-        vals, g_neighbors, g_weights, g_num_umi, g_model, g_centered, g_Wtot2, g_D
-    )
+def apply_batch_correction(vals, mu, var, batches):
+    """Center expression values within each batch."""
+    if batches is None:
+        return center_values(vals, mu, var)
+
+    corrected_vals = np.zeros_like(vals)
+    for batch in np.unique(batches):
+        mask = batches == batch
+        if mask.sum() == 0:
+            continue
+        if mask.sum() == 1:
+            corrected_vals[mask] = 0.0
+            continue
+        corrected_vals[mask] = center_values(vals[mask], mu[mask], var[mask])
+
+    return corrected_vals
