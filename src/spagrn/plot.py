@@ -30,8 +30,9 @@ warnings.filterwarnings('ignore')
 mpl.rcParams['pdf.fonttype'] = 42
 mpl.rcParams['ps.fonttype'] = 42
 mpl.rcParams['svg.fonttype'] = 'none'
-mpl.rcParams["ytick.labelright"] = True
-mpl.rcParams["ytick.labelleft"] = False
+# y labels on the right are set only inside go_bar (a global setting here moved every
+# y-axis label to the right in any code that imported spagrn)
+_RIGHT_YLABELS = {"ytick.labelright": True, "ytick.labelleft": False}
 
 # modules in self project
 
@@ -679,6 +680,11 @@ def cal_zscore(auc_mtx: pd.DataFrame, save=False) -> pd.DataFrame:
 
 
 def go_bar(fn):
+    with mpl.rc_context(_RIGHT_YLABELS):
+        _go_bar(fn)
+
+
+def _go_bar(fn):
     name = fn.split('.')[0]
     # df = pd.read_excel(fn)
     df = pd.read_csv(fn)
