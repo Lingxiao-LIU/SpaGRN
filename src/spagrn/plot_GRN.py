@@ -478,12 +478,14 @@ def plot_grn_network(
     if label_side == 'outside':        # offsets in points, so they hold at any figure size
         for node, (x, y) in pos.items():
             if node in tf_nodes:
-                xy, ha, va = (0, 5), 'center', 'bottom'
+                xy, ha, va = (0, 7), 'center', 'bottom'
             elif show_receptor and node in receptor_nodes:
-                xy, ha, va = (-5, 0), 'right', 'center'
+                xy, ha, va = (-7, 0), 'right', 'center'
             else:
-                xy, ha, va = (5, 0), 'left', 'center'
-            ax.annotate(node, (x, y), xytext=xy, textcoords='offset points', ha=ha, va=va, fontsize=font_size)
+                xy, ha, va = (6, 0), 'left', 'center'
+            # white backing keeps names readable where edges pass behind them
+            ax.annotate(node, (x, y), xytext=xy, textcoords='offset points', ha=ha, va=va, fontsize=font_size,
+                        bbox=dict(boxstyle='round,pad=0.1', fc='white', ec='none', alpha=0.85), zorder=5)
     else:
         nx.draw_networkx_labels(G, pos, font_size=font_size, ax=ax)
 
