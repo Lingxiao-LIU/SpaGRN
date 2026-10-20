@@ -48,6 +48,8 @@ def plot_grn_network(
     show_score_dist: bool = False,
     figsize: Tuple[int, int] = (12, 8),      
     score_dist_figsize: Tuple[int, int] = (10, 6),   
+    label_side: str = 'center',
+    legend_loc: str = 'best',
 ) -> Tuple[plt.Figure, nx.DiGraph]:
     """
     Create a Gene Regulatory Network plot showing receptors -> TFs -> target genes.
@@ -119,6 +121,12 @@ def plot_grn_network(
         Whether to show receptor score distribution plot
     score_dist_figsize : tuple, default (10, 6)
         Figure size for score distribution plot (width, height)
+    label_side : {'center', 'outside'}, default 'center'
+        'center' writes gene names on the nodes. 'outside' writes receptor names to the
+        left of their nodes, target names to the right and TF names above, so small
+        print-size nodes stay readable.
+    legend_loc : {'best', 'below'}, default 'best'
+        'below' puts a frameless legend under the network (saves width in print figures).
 
     Returns
     -------
@@ -410,6 +418,14 @@ def plot_grn_network(
                 ) for node, (x, y) in pos.items()
             }
 
+    if label_side == 'outside':        # one evenly spaced column per node type, using the full height
+        columns = [(receptor_nodes if show_receptor else set(), 0.1), (tf_nodes, 0.45),
+                   (set(pos) - set(tf_nodes) - (set(receptor_nodes) if show_receptor else set()), 0.8)]
+        for nodes, x in columns:
+            nodes = sorted((n for n in nodes if n in pos), key=lambda n: -pos[n][1])
+            for k, n in enumerate(nodes):
+                pos[n] = (x, 0.5 if len(nodes) == 1 else 0.95 - 0.9 * k / (len(nodes) - 1))
+
     # Create figure
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
 
@@ -423,7 +439,7 @@ def plot_grn_network(
             G, pos, edgelist=receptor_tf_edges,
             edge_color=colors['receptor_tf_edge'],
             width=2.0 * edge_width_scale,
-            alpha=0.7, ax=ax, arrows=True, arrowsize=20
+            alpha=0.7, ax=ax, arrows=True, arrowsize=20 * edge_width_scale
         )
 
     # Draw TF-target edges with varying widths based on importance
@@ -436,7 +452,7 @@ def plot_grn_network(
             nx.draw_networkx_edges(
                 G, pos, edgelist=[(u, v)],
                 edge_color=colors['tf_target_edge'],
-                width=width, alpha=alpha, ax=ax, arrows=True, arrowsize=15
+                width=width, alpha=alpha, ax=ax, arrows=True, arrowsize=15 * edge_width_scale
             )
 
     # Draw nodes (node sizes unchanged per user request)
@@ -459,7 +475,17 @@ def plot_grn_network(
             )
 
     # Draw labels with dynamic offset based on figure size
-    nx.draw_networkx_labels(G, pos, font_size=font_size, ax=ax)
+    if label_side == 'outside':        # offsets in points, so they hold at any figure size
+        for node, (x, y) in pos.items():
+            if node in tf_nodes:
+                xy, ha, va = (0, 5), 'center', 'bottom'
+            elif show_receptor and node in receptor_nodes:
+                xy, ha, va = (-5, 0), 'right', 'center'
+            else:
+                xy, ha, va = (5, 0), 'left', 'center'
+            ax.annotate(node, (x, y), xytext=xy, textcoords='offset points', ha=ha, va=va, fontsize=font_size)
+    else:
+        nx.draw_networkx_labels(G, pos, font_size=font_size, ax=ax)
 
     # Draw edge labels if requested
     if show_edge_labels:
@@ -491,7 +517,11 @@ def plot_grn_network(
             legend_elements.append(
                 plt.Line2D([0], [0], color=colors['tf_target_edge'], linewidth=2,
                           label='TF -> Target'))
-        ax.legend(handles=legend_elements, loc='best', fontsize=font_size, bbox_to_anchor=(1.0, 1.0))
+        if legend_loc == 'below':
+            ax.legend(handles=legend_elements, loc='upper center', bbox_to_anchor=(0.5, 0.0),
+                      ncol=3, frameon=False, fontsize=font_size)
+        else:
+            ax.legend(handles=legend_elements, loc='best', fontsize=font_size, bbox_to_anchor=(1.0, 1.0))
 
     # Set title (if provided)
     if title is None:
@@ -505,6 +535,8 @@ def plot_grn_network(
     if x_coords and y_coords:
         x_margin = 0.3 * (max(x_coords) - min(x_coords)) + 0.1
         y_margin = 0.3 * (max(y_coords) - min(y_coords)) + 0.1
+        if label_side == 'outside':    # columns already fill the height; keep room only for labels
+            x_margin, y_margin = 0.12, 0.04
         ax.set_xlim(min(x_coords) - x_margin, max(x_coords) + x_margin)
         ax.set_ylim(min(y_coords) - y_margin, max(y_coords) + y_margin)
 
