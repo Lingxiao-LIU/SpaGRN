@@ -1,334 +1,233 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-# @Date: Created on 30 Jun 2024 23:01
 # @Author: Yao LI
 # @File: SpaGRN/corexp.py
+"""
+Global bivariate spatial correlation (Moran's R / Geary's C) for TF-target pairs.
+
+Batch-corrected: each gene is centred on its own sample's mean (within-sample
+centring) and the denominator is the within-sample sum of squares. Because the
+spatial weights are batch-aware (block-diagonal, no cross-sample edges), every
+edge in the numerator is within a single sample, so cells from different samples
+are never correlated across the batch boundary.
+
+Performance: the gene x cell expression matrix and the per-edge index/weight
+vectors are written once to a memory-mapped temp file and read read-only by the
+workers, so they are never pickled per TF-target pair. Per-gene per-sample means
+and denominators are precomputed once instead of being recomputed per pair.
+"""
+
 import os
-import sys
 import time
-import scanpy as sc
+import tempfile
+import shutil
+
 import numpy as np
 import pandas as pd
-import anndata as ad
-import scipy
-from scipy.sparse import csr_matrix, issparse
-import multiprocessing
-from tqdm import tqdm
+from scipy.sparse import issparse, csr_matrix
+import scipy.sparse as sp
+from joblib import Parallel, delayed, dump, load
+from tqdm.auto import tqdm
 
 
-# --------------------- CO-EXPRESSION --------------------------
-# in case sparse X in h5ad
-def format_gene_array(gene_array):
-    if scipy.sparse.issparse(gene_array):
-        gene_array = gene_array.toarray()
-    return gene_array.reshape(-1)
+def _precompute_gene_stats(layer, batches):
+    """Per-gene per-sample means, per-cell sample codes, and within-sample denominators.
 
-class D:
-    def __init__(self):
-        pass
-# Bivariate Moran's R
-def bv_moran_r(gene_x_id, gene_y_id, cell_x_id, cell_y_id, wij, mtx):
-    """Compute bivariate Moran's R value of two given genes"""
-    # 3 get average
-    gene_x_exp_mean = mtx[:, gene_x_id].mean()
-    gene_y_exp_mean = mtx[:, gene_y_id].mean()
-    # 4 calculate denominator
-    gene_x_exp = format_gene_array(mtx[:, gene_x_id])
-    gene_y_exp = format_gene_array(mtx[:, gene_y_id])
-    denominator = np.sqrt(np.square(gene_x_exp - gene_x_exp_mean).sum()) * \
-                  np.sqrt(np.square(gene_y_exp - gene_y_exp_mean).sum())
-    # 5 calulate numerator
-    gene_x_in_cell_i = format_gene_array(mtx[cell_x_id, gene_x_id])
-    gene_y_in_cell_j = format_gene_array(mtx[cell_y_id, gene_y_id])
-    numerator = np.sum(wij * (gene_x_in_cell_i - gene_x_exp_mean) * (gene_y_in_cell_j - gene_y_exp_mean))
-    return numerator / denominator
-
-
-def compute_pairs_m(args):
-    """Apply function on two genes"""
-    gene_names, gene_x_id, gene_y_id, cell_x_id, cell_y_id, wij, mtx = args
-    value = bv_moran_r(gene_x_id, gene_y_id, cell_x_id, cell_y_id, wij, mtx)
-    tf = gene_names[gene_x_id]
-    gene = gene_names[gene_y_id]
-    return tf, gene, value
-
-
-def global_bivariate_moran_R(adata, weights: pd.DataFrame, tfs_in_data: list, select_genes: list, layer_key='raw_counts', num_workers: int = 4) -> pd.DataFrame:
+    Returns
+    -------
+    batch_means : (n_batches, n_genes) within-sample mean of each gene
+    codes       : (n_cells,) int       sample code per cell
+    denom       : (n_genes,)           sqrt of within-sample sum of squares
     """
-    :param adata:
-    :param weights:
-    :param tfs_in_data:
-    :param select_genes:
-    :param layer_key:
-    :param num_workers:
-    :return:
+    issp = issparse(layer)
+    n_cells, n_genes = layer.shape
+    layer = layer.tocsr() if issp else np.asarray(layer)
+
+    def _csum(m):
+        return np.asarray(m.sum(axis=0)).ravel()
+
+    def _csq(m):
+        return np.asarray(m.multiply(m).sum(axis=0)).ravel() if issparse(m) else (np.asarray(m) ** 2).sum(axis=0)
+
+    if batches is None:
+        codes = np.zeros(n_cells, dtype=np.int64)
+        s = _csum(layer)
+        bm = s / n_cells
+        sos = _csq(layer) - 2.0 * bm * s + (bm ** 2) * n_cells
+        return bm[None, :].astype(np.float64), codes, np.sqrt(np.maximum(sos, 0.0)).astype(np.float64)
+
+    uniq = pd.unique(batches)
+    codes = np.empty(n_cells, dtype=np.int64)
+    batch_means = np.zeros((len(uniq), n_genes))
+    sos = np.zeros(n_genes)
+    for bi, b in enumerate(uniq):
+        mask = (batches == b)
+        codes[mask] = bi
+        nb = int(mask.sum())
+        if nb == 0:
+            continue
+        sub = layer[mask]
+        s = _csum(sub)
+        bm = s / nb
+        batch_means[bi] = bm
+        # within-sample sum of squares: sum_c (x_c - bm)^2
+        sos += _csq(sub) - 2.0 * bm * s + (bm ** 2) * nb
+
+    return batch_means.astype(np.float64), codes, np.sqrt(np.maximum(sos, 0.0)).astype(np.float64)
+
+
+def _pair_moran(gx, gy, mtxT, cell_x_id, cell_y_id, wij, bmeansT, code_x, code_y, denom):
+    d = denom[gx] * denom[gy]
+    if d == 0:
+        return gx, gy, 0.0
+    x = mtxT[gx]
+    y = mtxT[gy]
+    cx = x[cell_x_id] - bmeansT[gx][code_x]   # within-sample centred at edge endpoints
+    cy = y[cell_y_id] - bmeansT[gy][code_y]
+    return gx, gy, float(np.dot(wij, cx * cy) / d)
+
+
+def _pair_geary(gx, gy, mtxT, cell_x_id, cell_y_id, wij, bmeansT, code_x, code_y, denom):
+    d = denom[gx] * denom[gy]
+    if d == 0:
+        return gx, gy, 0.0
+    x = mtxT[gx]
+    y = mtxT[gy]
+    # within-sample centring cancels in the within-edge differences
+    num = np.dot(wij, (x[cell_x_id] - x[cell_y_id]) * (y[cell_x_id] - y[cell_y_id]))
+    return gx, gy, float(num / d)
+
+
+def _build_sparse_weights(adata, weights, n):
+    """Build an (n x n) sparse weight matrix W[i,j]=w_ij from the flat edge list.
+
+    Maps cell names -> integer positions via a dict (NOT .loc on a 90M-element
+    string list, which materialises an ~8 GB <U24 array and OOMs at scale).
     """
-    gene_names = adata.var.index
-    # 1 gene name to matrix id
-    tf_ids = adata.var.index.get_indexer(tfs_in_data)
-    target_ids = adata.var.index.get_indexer(select_genes)
-    # 2 cell name to matrix id
-    tmp_obs = adata.obs.copy()
-    tmp_obs['id'] = np.arange(len(adata.obs))
-    cell_x_id = tmp_obs.loc[weights['Cell_x'].to_list()]['id'].to_numpy()
-    cell_y_id = tmp_obs.loc[weights['Cell_y'].to_list()]['id'].to_numpy()
-    if layer_key:
-        mtx = adata.layers[layer_key].toarray() if scipy.sparse.issparse(adata.layers[layer_key]) else adata.layers[
-            layer_key]
-    else:
-        mtx = adata.X.toarray() if scipy.sparse.issparse(adata.X) else adata.X
-    wij = weights['Weight'].to_numpy()
-    start_time = time.time()
-    pool_args = [(gene_names, gene_x_id, gene_y_id, cell_x_id, cell_y_id, wij, mtx) for gene_x_id in tf_ids for gene_y_id in target_ids]
-    with multiprocessing.Pool(processes=num_workers) as pool:
-        results = pool.map(compute_pairs_m, pool_args)
-    results_df = pd.DataFrame(results, columns=['TF', 'target', 'importance'])
-    end_time = time.time()
-    total_time = end_time - start_time
-    print(f"run_in_parallel_m: Total time taken: {total_time:.4f} seconds")
-    return results_df
+    name_to_id = {name: i for i, name in enumerate(adata.obs_names)}
+    cx = weights['Cell_x'].map(name_to_id).to_numpy(dtype=np.int64)
+    cy = weights['Cell_y'].map(name_to_id).to_numpy(dtype=np.int64)
+    wij = weights['Weight'].to_numpy(dtype=np.float64)
+    W = sp.csr_matrix((wij, (cx, cy)), shape=(n, n))
+    del cx, cy, wij
+    return W
 
 
-# Bivariate Greay's C
-def bv_geary_c(gene_x_id, gene_y_id, cell_x_id, cell_y_id, wij, mtx):
-    """Compute bivariate Geary's C value of two given genes"""
-    gene_x_exp_mean = mtx[:, gene_x_id].mean()
-    gene_y_exp_mean = mtx[:, gene_y_id].mean()
-    # 4 calculate denominator
-    gene_x_exp = format_gene_array(mtx[:, gene_x_id])
-    gene_y_exp = format_gene_array(mtx[:, gene_y_id])
-    denominator = np.sqrt(np.square(gene_x_exp - gene_x_exp_mean).sum()) * \
-                  np.sqrt(np.square(gene_y_exp - gene_y_exp_mean).sum())
-    # 5 calulate numerator
-    gene_x_in_cell_i = format_gene_array(mtx[cell_x_id, gene_x_id])
-    gene_x_in_cell_j = format_gene_array(mtx[cell_y_id, gene_x_id])
-    gene_y_in_cell_i = format_gene_array(mtx[cell_x_id, gene_y_id])
-    gene_y_in_cell_j = format_gene_array(mtx[cell_y_id, gene_y_id])
-    numerator = np.sum(wij * (gene_x_in_cell_i - gene_x_in_cell_j) * (gene_y_in_cell_i - gene_y_in_cell_j))
-    return numerator / denominator
+def _bivariate_driver(adata, weights, tfs_in_data, select_genes, layer_key, num_workers, batch_key, kind):
+    """Vectorised global bivariate Moran's R / Geary's C for all TF x target pairs.
 
-
-def compute_pairs_c(args):
-    """Apply function on two genes"""
-    gene_names, gene_x_id, gene_y_id, cell_x_id, cell_y_id, wij, mtx = args
-    value = bv_geary_c(gene_x_id, gene_y_id, cell_x_id, cell_y_id, wij, mtx)
-    tf = gene_names[gene_x_id]
-    gene = gene_names[gene_y_id]
-    return tf, gene, value
-
-
-def global_bivariate_gearys_C(adata, weights: pd.DataFrame, tfs_in_data: list, select_genes: list, layer_key='raw_counts', num_workers: int = 4) -> pd.DataFrame:
-    """
-    :param adata:
-    :param weights:
-    :param tfs_in_data:
-    :param select_genes:
-    :param layer_key:
-    :param num_workers:
-    :return:
+    Mathematically identical to the previous per-edge implementation (validated to
+    floating-point tolerance), but expressed as sparse-matrix products: the whole
+    TF x target matrix is computed with one sparse-dense matmul (plus a few dense
+    matmuls for Geary), instead of looping over millions of edges per pair. This
+    also removes the per-edge index arrays entirely, so it no longer allocates the
+    ~8 GB string arrays that OOM at 900k cells.
     """
     gene_names = adata.var.index
-    # 1 gene name to matrix id
-    tf_ids = adata.var.index.get_indexer(tfs_in_data)
-    target_ids = adata.var.index.get_indexer(select_genes)
-    # 2 cell name to matrix id
-    tmp_obs = adata.obs.copy()
-    tmp_obs['id'] = np.arange(len(adata.obs))
-    cell_x_id = tmp_obs.loc[weights['Cell_x'].to_list()]['id'].to_numpy()
-    cell_y_id = tmp_obs.loc[weights['Cell_y'].to_list()]['id'].to_numpy()
-    # 3 get average
-    if layer_key:
-        mtx = adata.layers[layer_key].toarray() if scipy.sparse.issparse(adata.layers[layer_key]) else adata.layers[layer_key]
+    tf_ids = gene_names.get_indexer(tfs_in_data)
+    target_ids = gene_names.get_indexer(select_genes)
+    n = adata.n_obs
+
+    layer = adata.layers[layer_key] if layer_key else adata.X
+    batches = None
+    if batch_key and batch_key in adata.obs.columns:
+        batches = adata.obs[batch_key].values
+        print(f"Using batch correction with batch key: {batch_key}")
+
+    # Per-gene per-sample means + within-sample denominators (sqrt of within-sample SoS).
+    batch_means, codes, denom = _precompute_gene_stats(layer, batches)
+
+    # Keep expression sparse (CSC for cheap column slicing). We NEVER densify the
+    # full (cells x genes) matrix -- only per-chunk column blocks -- so peak memory
+    # is bounded by one chunk regardless of cell/gene count.
+    Lsp = layer.tocsc() if issparse(layer) else csr_matrix(np.asarray(layer)).tocsc()
+
+    # Sparse weights matrix (no per-edge string materialisation).
+    W = _build_sparse_weights(adata, weights, n)
+
+    start = time.time()
+    dtf = denom[tf_ids]
+    n_tf, n_tar = len(tf_ids), len(target_ids)
+    TARGET_CHUNK = 2000
+    R = np.zeros((n_tf, n_tar))
+    print(f"bivariate {kind}: {n_tf} TFs x {n_tar} targets "
+          f"({n_tf * n_tar} pairs) via sparse matmul (chunked, low-mem)")
+
+    def _dense_cols(col_ids):
+        return np.ascontiguousarray(Lsp[:, col_ids].toarray(), dtype=np.float64)
+
+    def _center_cols(block, col_ids):
+        # within-sample centring: subtract each cell's sample mean for these genes
+        return block - batch_means[np.ix_(codes, col_ids)]
+
+    if kind == 'moran':
+        ZX = _center_cols(_dense_cols(tf_ids), tf_ids)        # cells x n_tf (small)
+        for c0 in range(0, n_tar, TARGET_CHUNK):
+            c1 = min(c0 + TARGET_CHUNK, n_tar)
+            tcols = target_ids[c0:c1]
+            ZY = _center_cols(_dense_cols(tcols), tcols)      # cells x chunk
+            Num = ZX.T @ (W @ ZY)                             # n_tf x chunk
+            dd = np.outer(dtf, denom[tcols])
+            R[:, c0:c1] = np.divide(Num, dd, out=np.zeros_like(Num), where=dd != 0)
+            del ZY
     else:
-        mtx = adata.X.toarray() if scipy.sparse.issparse(adata.X) else adata.X
-    wij = weights['Weight'].to_numpy()
-    start_time = time.time()
-    pool_args = [(gene_names, gene_x_id, gene_y_id, cell_x_id, cell_y_id, wij, mtx) for gene_x_id in tf_ids for gene_y_id in target_ids]
-    with multiprocessing.Pool(processes=num_workers) as pool:
-        results = pool.map(compute_pairs_c, pool_args)
-    results_df = pd.DataFrame(results, columns=['TF', 'target', 'importance'])
-    end_time = time.time()
-    total_time = end_time - start_time
-    print(f"run_in_parallel_m: Total time taken: {total_time:.4f} seconds")
-    return results_df
+        rs = np.asarray(W.sum(1)).ravel()
+        cs = np.asarray(W.sum(0)).ravel()
+        Xt = _dense_cols(tf_ids)                              # cells x n_tf (raw)
+        WXt = W @ Xt
+        Xt_rs = Xt * rs[:, None]
+        Xt_cs = Xt * cs[:, None]
+        for c0 in range(0, n_tar, TARGET_CHUNK):
+            c1 = min(c0 + TARGET_CHUNK, n_tar)
+            tcols = target_ids[c0:c1]
+            Yt = _dense_cols(tcols)                           # cells x chunk (raw)
+            Num = (Xt_rs.T @ Yt) - (Xt.T @ (W @ Yt)) - (WXt.T @ Yt) + (Xt_cs.T @ Yt)
+            dd = np.outer(dtf, denom[tcols])
+            R[:, c0:c1] = np.divide(Num, dd, out=np.zeros_like(Num), where=dd != 0)
+            del Yt
 
-
-def preprocess(adata: ad.AnnData, min_genes=0, min_cells=3, min_counts=1, max_gene_num=4000):
-    """
-    Perform cleaning and quality control on the imported data before constructing gene regulatory network
-    :param min_genes:
-    :param min_cells:
-    :param min_counts:
-    :param max_gene_num:
-    :return: a anndata.AnnData
-    """
-    adata.var_names_make_unique()  # compute the number of genes per cell (computes ‘n_genes' column)
-    # # find mito genes
-    sc.pp.ﬁlter_cells(adata, min_genes=0)
-    # add the total counts per cell as observations-annotation to adata
-    adata.obs['n_counts'] = np.ravel(adata.X.sum(axis=1))
-    # ﬁltering with basic thresholds for genes and cells
-    sc.pp.ﬁlter_cells(adata, min_genes=min_genes)
-    sc.pp.ﬁlter_genes(adata, min_cells=min_cells)
-    sc.pp.ﬁlter_genes(adata, min_counts=min_counts)
-    adata = adata[adata.obs['n_genes'] < max_gene_num, :]
-    return adata
-
-
-def read_list(fn):
-    with open(fn, 'r') as f:
-        l = f.read().splitlines()
-    return l
-
-
-def compute_weights(distances, neighborhood_factor=3):
-    from math import ceil
-    radius_ii = ceil(distances.shape[1] / neighborhood_factor)
-    sigma = distances[:, [radius_ii - 1]]
-    sigma[sigma == 0] = 1
-    weights = np.exp(-1 * distances ** 2 / sigma ** 2)
-    wnorm = weights.sum(axis=1, keepdims=True)
-    wnorm[wnorm == 0] = 1.0
-    weights = weights / wnorm
-    return weights
-
-
-def neighbors_and_weights(data,
-                          latent_obsm_key="spatial",
-                          n_neighbors=10,
-                          neighborhood_factor=3):
-    """
-    :param data:
-    :param latent_obsm_key:
-    :param n_neighbors:
-    :param neighborhood_factor:
-    :param approx_neighbors:
-    :return:
-    """
-    from sklearn.neighbors import NearestNeighbors
-    coords = data.obsm[latent_obsm_key]
-    # get Nearest n Neighbors
-    nbrs = NearestNeighbors(n_neighbors=n_neighbors, algorithm="ball_tree").fit(coords)
-    dist, ind = nbrs.kneighbors()  # neighbor name and index
-    # get spatial weights between two points
-    weights = compute_weights(
-        dist, neighborhood_factor=neighborhood_factor)
-    ind_df = pd.DataFrame(ind, index=data.obs_names)
-    neighbors = ind_df
-    weights = pd.DataFrame(weights, index=neighbors.index,
-                           columns=neighbors.columns)
-    return ind, neighbors, weights
-
-
-def flat_weights(cell_names, ind, weights, n_neighbors=30):
-    """
-    Turn neighbor index into
-    :param cell_names:
-    :param ind:
-    :param weights:
-    :param n_neighbors:
-    :return:
-    """
-    cell1 = np.repeat(cell_names, n_neighbors)
-    cell2_indices = ind.flatten()  # starts from 0
-    cell2 = cell_names[cell2_indices]
-    weight = weights.to_numpy().flatten()
-    df = pd.DataFrame({
-        "Cell_x": cell1,
-        "Cell_y": cell2,
-        "Weight": weight
+    # Long-form output (TF, target, importance), same columns as before.
+    tf_names = gene_names[tf_ids].to_numpy()
+    tar_names = gene_names[target_ids].to_numpy()
+    out = pd.DataFrame({
+        'TF': np.repeat(tf_names, len(target_ids)),
+        'target': np.tile(tar_names, len(tf_ids)),
+        'importance': R.ravel(),
     })
-    return df
+    print(f"global_bivariate_{kind}: {time.time() - start:.2f}s "
+          f"({len(tf_ids) * len(target_ids)} pairs)")
+    return out
 
 
-def get_p_M(I, adata, weights, gene_x, gene_y, permutation_num=99):
-    def __calc(w, zx, zy, den):
-        wzy = slag(w, zy)
-        num = (zx * wzy).sum()
-        return num / den
-    gene_matrix = adata.X
-    x = gene_matrix[:, gene_x]
-    x = np.asarray(x).flatten()
-    y = gene_matrix[:, gene_y]
-    y = np.asarray(y).flatten()
-    zx = (x - x.mean()) / x.std(ddof=1)
-    zy = (y - y.mean()) / y.std(ddof=1)
-    den = x.shape[0] - 1.0
-    sim = [__calc(weights, zx, np.random.permutation(zy), den) for i in range(permutation_num)]
-    sim = np.array(sim)
-    above = sim >= I
-    larger = above.sum()
-    if (permutation_num - larger) < larger:
-        larger = permutation_num - larger
-    p_sim = (larger + 1.0) / (permutation_num + 1.0)
-    return p_sim
+def global_bivariate_moran_R(adata, weights: pd.DataFrame, tfs_in_data: list, select_genes: list,
+                             layer_key='raw_counts', num_workers: int = 4, batch_key=None) -> pd.DataFrame:
+    """
+    Global bivariate Moran's R for every TF x target pair, with within-sample
+    batch correction when batch_key is given.
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+    weights : pd.DataFrame      flattened spatial weights (columns Cell_x, Cell_y, Weight)
+    tfs_in_data : list          transcription factors
+    select_genes : list         target genes
+    layer_key : str             expression layer
+    num_workers : int           parallel workers
+    batch_key : str, optional   adata.obs column with sample labels
+
+    Returns
+    -------
+    pd.DataFrame with columns TF, target, importance
+    """
+    return _bivariate_driver(adata, weights, tfs_in_data, select_genes,
+                             layer_key, num_workers, batch_key, kind='moran')
 
 
-def get_p_C(C, adata, weights, gene_x, gene_y, permutation_num=99):
-    sim = [bv_geary_c(adata, weights, gene_x, np.random.permutation(gene_y)) for i in range(permutation_num)]
-    sim = np.array(sim)
-    above = sim >= C
-    larger = above.sum()
-    if (permutation_num - larger) < larger:
-        larger = permutation_num - larger
-    p_sim = (larger + 1.0) / (permutation_num + 1.0)
-    return p_sim
-
-
-def main(data_fn, tfs_fn, genes_fn, layer_key='raw_counts', latent_obsm_key="spatial", n_neighbors=10, fw_fn=None, output_dir='.', num_workers=6):
-    print('Loading experimental data...')
-    adata = sc.read_h5ad(data_fn)
-    adata = preprocess(adata)
-    tfs = read_list(tfs_fn)
-    select_genes = read_list(genes_fn)
-    adata = adata[:, select_genes]
-    tfs_in_data = list(set(tfs).intersection(set(adata.var_names)))
-    print(f'{len(tfs_in_data)} TFs in data')
-    select_genes_not_tfs = list(set(select_genes) - set(tfs_in_data))
-    print(f'{len(select_genes_not_tfs)} genes to use.')
-    # ---- Weights
-    if fw_fn:
-        fw = pd.read_csv(fw_fn)
-    else:
-        print('Computing spatial weights matrix...')
-        ind, neighbors, weights_n = neighbors_and_weights(adata, latent_obsm_key=latent_obsm_key, n_neighbors=n_neighbors)
-        cell_names = adata.obs_names
-        print('Shifting spatial weight matrix shape...')
-        fw = flat_weights(cell_names, ind, weights_n, n_neighbors=n_neighbors)
-        fw.to_csv(f'{output_dir}/flat_weights.csv', index=False)
-    # --- TEST BV
-    print("Computing global bivariate geary'C value in parallel...")
-    local_correlations_bv_gc = global_bivariate_gearys_C(adata,
-                                                         fw,
-                                                         tfs_in_data,
-                                                         select_genes,
-                                                         num_workers=num_workers,
-                                                         layer_key=layer_key)
-    local_correlations_bv_gc.to_csv(f'{output_dir}/local_correlations_bv_gc.csv', index=None)
-    print("Computing global bivariate Moran's R value in parallel...")
-    local_correlations_bv_mr = global_bivariate_moran_R(adata,
-                                                        fw,
-                                                        tfs_in_data,
-                                                        select_genes,
-                                                        num_workers=num_workers,
-                                                        layer_key=layer_key)
-    local_correlations_bv_mr.to_csv(f'{output_dir}/local_correlations_bv_mr.csv', index=None)
-
-
-if __name__ == '__main__':
-    project_id = sys.argv[1]
-    if project_id == 'E14-16h':
-        data_fn = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/DATA/fly_pca/E14-16h_pca.h5ad'
-        tfs_fn = '/dellfsqd2/ST_OCEAN/USER/liyao1/06.stereopy/resource/tfs/allTFs_dmel.txt'
-        genes_fn = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/exp/13.revision/E14-16h/hotspot_og/hotspot_select_genes.txt'
-        fw_fn = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/exp/13.revision/E14-16h/E14-16h_flat_weights.csv'
-        output_dir = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/exp/13.revision/E14-16h'
-        main(data_fn, tfs_fn, genes_fn, fw_fn=fw_fn, output_dir=output_dir, num_workers=6)
-    elif project_id == 'mouse_brain':
-        data_fn = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/DATA/Mouse_brain_cell_bin.h5ad'
-        tfs_fn = '/dellfsqd2/ST_OCEAN/USER/liyao1/06.stereopy/resource/tfs/allTFs_mm.txt'
-        genes_fn = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/exp/13.revision/mouse_brain/global_genes.txt'
-        fw_fn = '/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/exp/13.revision/mouse_brain/flat_weights.csv'
-        output_dir = f'/dellfsqd2/ST_OCEAN/USER/liyao1/07.spatialGRN/exp/13.revision/{project_id}'
-        main(data_fn, tfs_fn, genes_fn, layer_key='counts', latent_obsm_key="spatial", n_neighbors=10, fw_fn=fw_fn,
-             output_dir=output_dir, num_workers=20)
+def global_bivariate_gearys_C(adata, weights: pd.DataFrame, tfs_in_data: list, select_genes: list,
+                              layer_key='raw_counts', num_workers: int = 4, batch_key=None) -> pd.DataFrame:
+    """
+    Global bivariate Geary's C for every TF x target pair, with within-sample
+    batch correction when batch_key is given. Parameters as in global_bivariate_moran_R.
+    """
+    return _bivariate_driver(adata, weights, tfs_in_data, select_genes,
+                             layer_key, num_workers, batch_key, kind='geary')

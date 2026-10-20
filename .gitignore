@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+build/
+*.egg-info/
+.venv/
+debug.log
+src/spagrn/tmp_files/
+.DS_Store

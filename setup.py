@@ -11,7 +11,7 @@ setuptools.setup(
     author_email="liyao1@genomics.cn",
     url="https://github.com/BGI-Qingdao/SpaGRN",
     #long_description=Path('README.md').read_text('utf-8'),
-    python_requires=">=3.8,<3.9",
+    python_requires=">=3.8,<3.11",
     packages=["spagrn", "spagrn.cli"],
     #packages=setuptools.find_packages(where="src"),
     package_dir={"": "src"},
