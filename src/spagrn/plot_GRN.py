@@ -2919,3 +2919,8 @@ def compute_receptor_regulon_correlations(
 
     print(f"Done: correlation matrix {corr.shape} (receptors x cols).")
     return corr, zsc
+
+# Opt-in print style: no effect unless spagrn.print_style.use('print') is called
+from .print_style import wrap_all as _wrap_all
+_wrap_all(globals(), ['plot_grn_network', 'plot_receptor_correlation_heatmap', 'plot_receptor_score_distribution',
+                      'plot_grn_network_with_common_receptors', 'plot_lr_gene_group_bubble'])

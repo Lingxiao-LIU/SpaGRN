@@ -2554,3 +2554,9 @@ def rss_rank_plot(adata,
     if return_fig:
         return fig
     return None
+
+# Opt-in print style: no effect unless spagrn.print_style.use('print') is called
+from .print_style import wrap_all as _wrap_all
+_wrap_all(globals(), ['isr_heatmap', 'isr_violin', 'isr_ridge', 'create_individual_cell_heatmap', 'isr_test',
+                      'spatial_regulon_map', 'plot_spatial_auc', 'find_marker_regulon', 'rss_heatmap',
+                      'rss_rank_plot'])
