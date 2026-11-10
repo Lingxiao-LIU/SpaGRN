@@ -1,4 +1,3 @@
-# /Users/linliu/NewSpaGRN/src/spagrn/__init__.py
 __package__ = 'spagrn'
 
 __all__ = [
